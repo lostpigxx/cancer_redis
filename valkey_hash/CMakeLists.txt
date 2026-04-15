@@ -19,3 +19,8 @@ target_compile_options(hashtable_test PRIVATE -Wall -Wextra -Wpedantic)
 add_executable(example src/example.cpp)
 target_link_libraries(example PRIVATE valkey_hash)
 target_compile_options(example PRIVATE -Wall -Wextra -Wpedantic)
+
+# Benchmark binary
+add_executable(benchmark src/benchmark.cpp)
+target_link_libraries(benchmark PRIVATE valkey_hash)
+target_compile_options(benchmark PRIVATE -Wall -Wextra -Wpedantic)
