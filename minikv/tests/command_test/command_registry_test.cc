@@ -16,7 +16,7 @@ class DummyCmd : public minikv::Cmd {
     return rocksdb::Status::OK();
   }
 
-  minikv::CommandResponse Do(minikv::DBEngine* /*engine*/) override {
+  minikv::CommandResponse Do(minikv::CommandContext* /*context*/) override {
     return MakeSimpleString("OK");
   }
 };

@@ -122,9 +122,11 @@ if [[ "${SKIP_TESTS}" -eq 0 ]]; then
     minikv_cmd_test
     minikv_command_registry_test
     minikv_hash_test
+    minikv_hash_module_test
     minikv_reply_encode_test
+    minikv_scheduler_test
     minikv_server_test
-    minikv_worker_test
+    minikv_snapshot_test
   )
 
   for test_bin in "${tests[@]}"; do

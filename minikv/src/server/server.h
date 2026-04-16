@@ -19,8 +19,6 @@
 
 namespace minikv {
 
-class WorkerRuntime;
-
 class Server {
  public:
   Server(const Config& config, MiniKV* minikv);
@@ -87,7 +85,6 @@ class Server {
 
   Config config_;
   MiniKV* minikv_;
-  std::unique_ptr<WorkerRuntime> worker_runtime_;
   int listen_fd_ = -1;
   uint16_t bound_port_ = 0;
   std::thread accept_thread_;

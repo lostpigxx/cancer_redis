@@ -4,7 +4,7 @@
 #include <utility>
 #include <vector>
 
-#include "engine/db_engine.h"
+#include "types/hash/hash_module.h"
 
 namespace minikv {
 namespace {
@@ -29,9 +29,14 @@ class HSetCmd : public Cmd {
     return rocksdb::Status::OK();
   }
 
-  CommandResponse Do(DBEngine* engine) override {
+  CommandResponse Do(CommandContext* context) override {
+    if (context == nullptr || context->hash_module == nullptr) {
+      return MakeStatus(
+          rocksdb::Status::InvalidArgument("hash module is unavailable"));
+    }
     bool inserted = false;
-    rocksdb::Status status = engine->HSet(key_, field_, value_, &inserted);
+    rocksdb::Status status =
+        context->hash_module->PutField(key_, field_, value_, &inserted);
     if (!status.ok()) {
       return MakeStatus(std::move(status));
     }
@@ -62,9 +67,13 @@ class HGetAllCmd : public Cmd {
     return rocksdb::Status::OK();
   }
 
-  CommandResponse Do(DBEngine* engine) override {
+  CommandResponse Do(CommandContext* context) override {
+    if (context == nullptr || context->hash_module == nullptr) {
+      return MakeStatus(
+          rocksdb::Status::InvalidArgument("hash module is unavailable"));
+    }
     std::vector<FieldValue> values;
-    rocksdb::Status status = engine->HGetAll(key_, &values);
+    rocksdb::Status status = context->hash_module->ReadAll(key_, &values);
     if (!status.ok()) {
       return MakeStatus(std::move(status));
     }
@@ -100,9 +109,14 @@ class HDelCmd : public Cmd {
     return rocksdb::Status::OK();
   }
 
-  CommandResponse Do(DBEngine* engine) override {
+  CommandResponse Do(CommandContext* context) override {
+    if (context == nullptr || context->hash_module == nullptr) {
+      return MakeStatus(
+          rocksdb::Status::InvalidArgument("hash module is unavailable"));
+    }
     uint64_t deleted = 0;
-    rocksdb::Status status = engine->HDel(key_, fields_, &deleted);
+    rocksdb::Status status =
+        context->hash_module->DeleteFields(key_, fields_, &deleted);
     if (!status.ok()) {
       return MakeStatus(std::move(status));
     }

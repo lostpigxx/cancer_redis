@@ -12,8 +12,7 @@
 namespace minikv {
 
 class Cmd;
-class DBEngine;
-class KeyLockTable;
+class Scheduler;
 class Server;
 
 class MiniKV {
@@ -53,8 +52,7 @@ class MiniKV {
   explicit MiniKV(std::unique_ptr<Impl> impl);
   rocksdb::Status Submit(std::unique_ptr<Cmd> cmd, CommandCallback callback);
   CommandResponse Execute(std::unique_ptr<Cmd> cmd);
-  DBEngine* engine();
-  KeyLockTable* key_lock_table();
+  Scheduler* scheduler();
 
   std::unique_ptr<Impl> impl_;
 };

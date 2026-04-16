@@ -4,9 +4,10 @@
 #include <utility>
 
 #include "command/cmd_create.h"
-#include "engine/db_engine.h"
-#include "worker/key_lock_table.h"
-#include "worker/worker.h"
+#include "kernel/mutation_hook.h"
+#include "kernel/scheduler.h"
+#include "kernel/storage_engine.h"
+#include "types/hash/hash_module.h"
 
 namespace minikv {
 
@@ -14,16 +15,17 @@ class MiniKV::Impl {
  public:
   explicit Impl(const Config& config_value)
       : config(config_value),
-        key_lock_table(
-            KeyLockTable::DefaultStripeCount(config_value.worker_threads)),
-        submit_runtime(std::make_unique<WorkerRuntime>(
-            &engine, &key_lock_table, config_value.worker_threads,
-            config_value.max_pending_requests_per_worker)) {}
+        hash_module(&storage_engine, &mutation_hook),
+        command_context{&storage_engine, &hash_module},
+        scheduler(&command_context, config_value.worker_threads,
+                  config_value.max_pending_requests_per_worker) {}
 
   Config config;
-  DBEngine engine;
-  KeyLockTable key_lock_table;
-  std::unique_ptr<WorkerRuntime> submit_runtime;
+  StorageEngine storage_engine;
+  NoopMutationHook mutation_hook;
+  HashModule hash_module;
+  CommandContext command_context;
+  Scheduler scheduler;
 };
 
 MiniKV::MiniKV(std::unique_ptr<Impl> impl) : impl_(std::move(impl)) {}
@@ -33,7 +35,7 @@ MiniKV::~MiniKV() = default;
 rocksdb::Status MiniKV::Open(const Config& config,
                              std::unique_ptr<MiniKV>* minikv) {
   auto impl = std::unique_ptr<Impl>(new Impl(config));
-  rocksdb::Status status = impl->engine.Open(config);
+  rocksdb::Status status = impl->storage_engine.Open(config);
   if (!status.ok()) {
     return status;
   }
@@ -86,20 +88,14 @@ rocksdb::Status MiniKV::Submit(std::string name, std::string key,
 
 rocksdb::Status MiniKV::Submit(std::unique_ptr<Cmd> cmd,
                                CommandCallback callback) {
-  return impl_->submit_runtime->Submit(std::move(cmd), std::move(callback));
+  return impl_->scheduler.Submit(std::move(cmd), std::move(callback));
 }
 
 CommandResponse MiniKV::Execute(std::unique_ptr<Cmd> cmd) {
-  if (cmd == nullptr) {
-    return CommandResponse{rocksdb::Status::InvalidArgument("cmd is required"),
-                           {}};
-  }
-  return ExecuteCommand(&impl_->engine, &impl_->key_lock_table, cmd.get());
+  return impl_->scheduler.ExecuteInline(std::move(cmd));
 }
 
-DBEngine* MiniKV::engine() { return &impl_->engine; }
-
-KeyLockTable* MiniKV::key_lock_table() { return &impl_->key_lock_table; }
+Scheduler* MiniKV::scheduler() { return &impl_->scheduler; }
 
 rocksdb::Status MiniKV::HSet(const std::string& key, const std::string& field,
                              const std::string& value, bool* inserted) {

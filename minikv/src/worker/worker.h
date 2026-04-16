@@ -12,8 +12,6 @@
 #include <vector>
 
 #include "command/cmd.h"
-#include "engine/db_engine.h"
-#include "server/metrics.h"
 #include "worker/key_lock_table.h"
 
 namespace minikv {
@@ -21,17 +19,14 @@ namespace minikv {
 struct WorkerTask {
   using Completion = std::function<void(CommandResponse)>;
 
-  size_t io_thread_id = 0;
-  uint64_t connection_id = 0;
-  uint64_t request_seq = 0;
   std::unique_ptr<Cmd> cmd;
   Completion completion;
 };
 
 class Worker {
  public:
-  Worker(DBEngine* engine, KeyLockTable* key_lock_table, size_t queue_depth,
-         size_t worker_id);
+  Worker(CommandContext* context, KeyLockTable* key_lock_table,
+         size_t queue_depth, size_t worker_id);
   ~Worker();
 
   Worker(const Worker&) = delete;
@@ -68,7 +63,7 @@ class Worker {
   CommandResponse ExecuteTask(WorkerTask* task);
   void Run();
 
-  DBEngine* engine_;
+  CommandContext* context_;
   KeyLockTable* key_lock_table_;
   BoundedMPSCQueue queue_;
   size_t worker_id_;
@@ -78,37 +73,7 @@ class Worker {
   std::thread thread_;
 };
 
-class WorkerRuntime {
- public:
-  using Completion = WorkerTask::Completion;
-
-  WorkerRuntime(DBEngine* engine, KeyLockTable* key_lock_table,
-                size_t worker_count, size_t max_queue_depth);
-  ~WorkerRuntime() = default;
-
-  WorkerRuntime(const WorkerRuntime&) = delete;
-  WorkerRuntime& operator=(const WorkerRuntime&) = delete;
-
-  rocksdb::Status Submit(std::unique_ptr<Cmd> cmd, Completion completion,
-                         size_t io_thread_id = 0, uint64_t connection_id = 0,
-                         uint64_t request_seq = 0);
-  uint64_t rejected_requests() const {
-    return rejected_requests_.load(std::memory_order_relaxed);
-  }
-  uint64_t inflight_requests() const {
-    return inflight_requests_.load(std::memory_order_relaxed);
-  }
-  std::vector<size_t> worker_queue_depth() const;
-  MetricsSnapshot GetMetricsSnapshot() const;
-
- private:
-  std::vector<std::unique_ptr<Worker>> workers_;
-  std::atomic<size_t> next_worker_{0};
-  std::atomic<uint64_t> rejected_requests_{0};
-  std::atomic<uint64_t> inflight_requests_{0};
-};
-
-CommandResponse ExecuteCommand(DBEngine* engine, KeyLockTable* key_lock_table,
-                               Cmd* cmd);
+CommandResponse ExecuteCommand(CommandContext* context,
+                               KeyLockTable* key_lock_table, Cmd* cmd);
 
 }  // namespace minikv
