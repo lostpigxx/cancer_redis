@@ -1,3 +1,7 @@
 .claude
 .vscode
 build
+minikv/build
+minikv/build*/
+__pycache__/
+*.pyc
