@@ -16,12 +16,12 @@ rocksdb::Status Cmd::Init(const CmdInput& input) {
   return status;
 }
 
-CommandResponse Cmd::Execute(DBEngine* engine) {
+CommandResponse Cmd::Execute(CommandContext* context) {
   if (!initialized_) {
     return MakeStatus(rocksdb::Status::InvalidArgument(
         "command must be initialized before execution"));
   }
-  return Do(engine);
+  return Do(context);
 }
 
 CommandResponse Cmd::MakeStatus(rocksdb::Status status) {

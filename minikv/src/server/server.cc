@@ -20,8 +20,8 @@
 
 #include "command/cmd_create.h"
 #include "common/thread_name.h"
+#include "kernel/scheduler.h"
 #include "server/resp_parser.h"
-#include "worker/worker.h"
 
 namespace minikv {
 
@@ -91,9 +91,6 @@ rocksdb::Status Server::Start() {
     started_.store(false);
     return status;
   }
-  worker_runtime_ = std::make_unique<WorkerRuntime>(
-      minikv_->engine(), minikv_->key_lock_table(), config_.worker_threads,
-      config_.max_pending_requests_per_worker);
 
   const size_t io_thread_count = std::max<size_t>(1, config_.io_threads);
   io_threads_.reserve(io_thread_count);
@@ -162,7 +159,6 @@ void Server::Wait() {
     }
   }
   io_threads_.clear();
-  worker_runtime_.reset();
   started_.store(false);
 }
 
@@ -186,8 +182,8 @@ MetricsSnapshot Server::GetMetricsSnapshot() const {
   snapshot.errored_connections =
       errored_connections_.load(std::memory_order_relaxed);
   snapshot.parse_errors = parse_errors_.load(std::memory_order_relaxed);
-  if (worker_runtime_ != nullptr) {
-    MetricsSnapshot worker_snapshot = worker_runtime_->GetMetricsSnapshot();
+  if (minikv_ != nullptr) {
+    MetricsSnapshot worker_snapshot = minikv_->scheduler()->GetMetricsSnapshot();
     snapshot.worker_queue_depth = std::move(worker_snapshot.worker_queue_depth);
     snapshot.worker_rejections = worker_snapshot.worker_rejections;
     snapshot.worker_inflight = worker_snapshot.worker_inflight;
@@ -470,7 +466,7 @@ bool Server::HandleReadable(size_t io_thread_id, Connection* connection) {
       const uint64_t request_seq = connection->next_request_seq++;
       IOThreadState* io_thread = io_threads_[io_thread_id].get();
       io_thread->inflight_requests.fetch_add(1, std::memory_order_relaxed);
-      status = worker_runtime_->Submit(
+      status = minikv_->Submit(
           std::move(cmd),
           [this, io_thread_id, connection_id = connection->id, request_seq](
               CommandResponse response) mutable {
@@ -481,8 +477,7 @@ bool Server::HandleReadable(size_t io_thread_id, Connection* connection) {
                   connection_id, request_seq, std::move(response)});
             }
             NotifyIOThread(state);
-          },
-          io_thread_id, connection->id, request_seq);
+          });
       if (!status.ok()) {
         io_thread->inflight_requests.fetch_sub(1, std::memory_order_relaxed);
         --connection->pending_requests;

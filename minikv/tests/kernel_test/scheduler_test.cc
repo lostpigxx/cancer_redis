@@ -11,9 +11,9 @@
 #include <thread>
 #include <vector>
 
+#include "command/cmd.h"
 #include "gtest/gtest.h"
-#include "worker/key_lock_table.h"
-#include "worker/worker.h"
+#include "kernel/scheduler.h"
 
 namespace {
 
@@ -51,7 +51,7 @@ class BlockingCmd : public minikv::Cmd {
     return rocksdb::Status::OK();
   }
 
-  minikv::CommandResponse Do(minikv::DBEngine* /*engine*/) override {
+  minikv::CommandResponse Do(minikv::CommandContext* /*context*/) override {
     {
       std::lock_guard<std::mutex> lock(tracker_->mutex);
       gate_->entered = true;
@@ -110,7 +110,7 @@ class QuickCmd : public minikv::Cmd {
     return rocksdb::Status::OK();
   }
 
-  minikv::CommandResponse Do(minikv::DBEngine* /*engine*/) override {
+  minikv::CommandResponse Do(minikv::CommandContext* /*context*/) override {
     return MakeSimpleString("OK");
   }
 
@@ -134,31 +134,30 @@ bool WaitFor(Tracker* tracker, const std::function<bool()>& predicate,
   return tracker->cv.wait_for(lock, timeout, predicate);
 }
 
-TEST(WorkerRuntimeTest, SameKeyTasksDoNotExecuteInParallel) {
-  minikv::KeyLockTable key_locks(128);
-  minikv::WorkerRuntime runtime(nullptr, &key_locks, 2, 4);
+TEST(SchedulerTest, SameKeyTasksDoNotExecuteInParallel) {
+  minikv::Scheduler scheduler(nullptr, 2, 4);
   Tracker tracker;
   Gate first_gate;
   Gate second_gate;
   std::promise<void> first_done;
   std::promise<void> second_done;
 
-  ASSERT_TRUE(runtime.Submit(
-                        MakeBlockingCmd("user:1", &tracker, &first_gate),
-                        [&](minikv::CommandResponse response) {
-                          ASSERT_TRUE(response.status.ok());
-                          first_done.set_value();
-                        })
+  ASSERT_TRUE(scheduler.Submit(
+                          MakeBlockingCmd("user:1", &tracker, &first_gate),
+                          [&](minikv::CommandResponse response) {
+                            ASSERT_TRUE(response.status.ok());
+                            first_done.set_value();
+                          })
                   .ok());
   ASSERT_TRUE(WaitFor(&tracker, [&] { return first_gate.entered; },
                       std::chrono::seconds(1)));
 
-  ASSERT_TRUE(runtime.Submit(
-                        MakeBlockingCmd("user:1", &tracker, &second_gate),
-                        [&](minikv::CommandResponse response) {
-                          ASSERT_TRUE(response.status.ok());
-                          second_done.set_value();
-                        })
+  ASSERT_TRUE(scheduler.Submit(
+                          MakeBlockingCmd("user:1", &tracker, &second_gate),
+                          [&](minikv::CommandResponse response) {
+                            ASSERT_TRUE(response.status.ok());
+                            second_done.set_value();
+                          })
                   .ok());
 
   const bool second_entered_early =
@@ -188,9 +187,8 @@ TEST(WorkerRuntimeTest, SameKeyTasksDoNotExecuteInParallel) {
   second_done.get_future().wait();
 }
 
-TEST(WorkerRuntimeTest, SameKeyTasksSerializeEvenWhenMultipleWorkersPickThemUp) {
-  minikv::KeyLockTable key_locks(128);
-  minikv::WorkerRuntime runtime(nullptr, &key_locks, 4, 8);
+TEST(SchedulerTest, SameKeyTasksSerializeEvenWhenMultipleWorkersPickThemUp) {
+  minikv::Scheduler scheduler(nullptr, 4, 8);
   Tracker tracker;
   std::array<Gate, 4> gates;
   std::vector<std::promise<void>> done(4);
@@ -201,12 +199,12 @@ TEST(WorkerRuntimeTest, SameKeyTasksSerializeEvenWhenMultipleWorkersPickThemUp) 
   }
 
   for (size_t i = 0; i < gates.size(); ++i) {
-    ASSERT_TRUE(runtime.Submit(
-                          MakeBlockingCmd("shared:key", &tracker, &gates[i]),
-                          [&done, i](minikv::CommandResponse response) {
-                            ASSERT_TRUE(response.status.ok());
-                            done[i].set_value();
-                          })
+    ASSERT_TRUE(scheduler.Submit(
+                            MakeBlockingCmd("shared:key", &tracker, &gates[i]),
+                            [&done, i](minikv::CommandResponse response) {
+                              ASSERT_TRUE(response.status.ok());
+                              done[i].set_value();
+                            })
                     .ok());
   }
 
@@ -257,31 +255,30 @@ TEST(WorkerRuntimeTest, SameKeyTasksSerializeEvenWhenMultipleWorkersPickThemUp) 
   EXPECT_GE(unique_threads.size(), 2U);
 }
 
-TEST(WorkerRuntimeTest, DifferentKeysCanExecuteInParallel) {
-  minikv::KeyLockTable key_locks(128);
-  minikv::WorkerRuntime runtime(nullptr, &key_locks, 2, 4);
+TEST(SchedulerTest, DifferentKeysCanExecuteInParallel) {
+  minikv::Scheduler scheduler(nullptr, 2, 4);
   Tracker tracker;
   Gate first_gate;
   Gate second_gate;
   std::promise<void> first_done;
   std::promise<void> second_done;
 
-  ASSERT_TRUE(runtime.Submit(
-                        MakeBlockingCmd("user:1", &tracker, &first_gate),
-                        [&](minikv::CommandResponse response) {
-                          ASSERT_TRUE(response.status.ok());
-                          first_done.set_value();
-                        })
+  ASSERT_TRUE(scheduler.Submit(
+                          MakeBlockingCmd("user:1", &tracker, &first_gate),
+                          [&](minikv::CommandResponse response) {
+                            ASSERT_TRUE(response.status.ok());
+                            first_done.set_value();
+                          })
                   .ok());
   ASSERT_TRUE(WaitFor(&tracker, [&] { return first_gate.entered; },
                       std::chrono::seconds(1)));
 
-  ASSERT_TRUE(runtime.Submit(
-                        MakeBlockingCmd("user:2", &tracker, &second_gate),
-                        [&](minikv::CommandResponse response) {
-                          ASSERT_TRUE(response.status.ok());
-                          second_done.set_value();
-                        })
+  ASSERT_TRUE(scheduler.Submit(
+                          MakeBlockingCmd("user:2", &tracker, &second_gate),
+                          [&](minikv::CommandResponse response) {
+                            ASSERT_TRUE(response.status.ok());
+                            second_done.set_value();
+                          })
                   .ok());
   const bool second_entered =
       WaitFor(&tracker, [&] { return second_gate.entered; },
@@ -302,31 +299,30 @@ TEST(WorkerRuntimeTest, DifferentKeysCanExecuteInParallel) {
   second_done.get_future().wait();
 }
 
-TEST(WorkerRuntimeTest, EmptyRouteKeyDoesNotTakeKeyLock) {
-  minikv::KeyLockTable key_locks(128);
-  minikv::WorkerRuntime runtime(nullptr, &key_locks, 2, 4);
+TEST(SchedulerTest, EmptyRouteKeyDoesNotTakeKeyLock) {
+  minikv::Scheduler scheduler(nullptr, 2, 4);
   Tracker tracker;
   Gate first_gate;
   Gate second_gate;
   std::promise<void> first_done;
   std::promise<void> second_done;
 
-  ASSERT_TRUE(runtime.Submit(
-                        MakeBlockingCmd("", &tracker, &first_gate),
-                        [&](minikv::CommandResponse response) {
-                          ASSERT_TRUE(response.status.ok());
-                          first_done.set_value();
-                        })
+  ASSERT_TRUE(scheduler.Submit(
+                          MakeBlockingCmd("", &tracker, &first_gate),
+                          [&](minikv::CommandResponse response) {
+                            ASSERT_TRUE(response.status.ok());
+                            first_done.set_value();
+                          })
                   .ok());
   ASSERT_TRUE(WaitFor(&tracker, [&] { return first_gate.entered; },
                       std::chrono::seconds(1)));
 
-  ASSERT_TRUE(runtime.Submit(
-                        MakeBlockingCmd("", &tracker, &second_gate),
-                        [&](minikv::CommandResponse response) {
-                          ASSERT_TRUE(response.status.ok());
-                          second_done.set_value();
-                        })
+  ASSERT_TRUE(scheduler.Submit(
+                          MakeBlockingCmd("", &tracker, &second_gate),
+                          [&](minikv::CommandResponse response) {
+                            ASSERT_TRUE(response.status.ok());
+                            second_done.set_value();
+                          })
                   .ok());
   const bool second_entered =
       WaitFor(&tracker, [&] { return second_gate.entered; },
@@ -347,9 +343,8 @@ TEST(WorkerRuntimeTest, EmptyRouteKeyDoesNotTakeKeyLock) {
   second_done.get_future().wait();
 }
 
-TEST(WorkerRuntimeTest, DifferentKeyQuickTaskCompletesWhileHotKeyIsBlocked) {
-  minikv::KeyLockTable key_locks(128);
-  minikv::WorkerRuntime runtime(nullptr, &key_locks, 2, 4);
+TEST(SchedulerTest, DifferentKeyQuickTaskCompletesWhileHotKeyIsBlocked) {
+  minikv::Scheduler scheduler(nullptr, 2, 4);
   Tracker tracker;
   Gate blocked_gate;
   std::promise<void> blocked_entered;
@@ -359,22 +354,22 @@ TEST(WorkerRuntimeTest, DifferentKeyQuickTaskCompletesWhileHotKeyIsBlocked) {
   std::promise<void> quick_done;
   std::future<void> quick_done_future = quick_done.get_future();
 
-  ASSERT_TRUE(runtime.Submit(
-                        MakeBlockingCmd("user:hot", &tracker, &blocked_gate,
-                                        &blocked_entered),
-                        [&](minikv::CommandResponse response) {
-                          ASSERT_TRUE(response.status.ok());
-                          blocked_done.set_value();
-                        })
+  ASSERT_TRUE(scheduler.Submit(
+                          MakeBlockingCmd("user:hot", &tracker, &blocked_gate,
+                                          &blocked_entered),
+                          [&](minikv::CommandResponse response) {
+                            ASSERT_TRUE(response.status.ok());
+                            blocked_done.set_value();
+                          })
                   .ok());
   blocked_entered_future.wait();
 
-  ASSERT_TRUE(runtime.Submit(
-                        MakeQuickCmd("user:cold"),
-                        [&](minikv::CommandResponse response) {
-                          ASSERT_TRUE(response.status.ok());
-                          quick_done.set_value();
-                        })
+  ASSERT_TRUE(scheduler.Submit(
+                          MakeQuickCmd("user:cold"),
+                          [&](minikv::CommandResponse response) {
+                            ASSERT_TRUE(response.status.ok());
+                            quick_done.set_value();
+                          })
                   .ok());
 
   EXPECT_EQ(quick_done_future.wait_for(std::chrono::milliseconds(200)),
@@ -388,9 +383,8 @@ TEST(WorkerRuntimeTest, DifferentKeyQuickTaskCompletesWhileHotKeyIsBlocked) {
   blocked_done_future.wait();
 }
 
-TEST(WorkerRuntimeTest, SameKeyQuickTaskWaitsUntilBlockedTaskReleasesLock) {
-  minikv::KeyLockTable key_locks(128);
-  minikv::WorkerRuntime runtime(nullptr, &key_locks, 2, 4);
+TEST(SchedulerTest, SameKeyQuickTaskWaitsUntilBlockedTaskReleasesLock) {
+  minikv::Scheduler scheduler(nullptr, 2, 4);
   Tracker tracker;
   Gate blocked_gate;
   std::promise<void> blocked_entered;
@@ -400,22 +394,22 @@ TEST(WorkerRuntimeTest, SameKeyQuickTaskWaitsUntilBlockedTaskReleasesLock) {
   std::promise<void> quick_done;
   std::future<void> quick_done_future = quick_done.get_future();
 
-  ASSERT_TRUE(runtime.Submit(
-                        MakeBlockingCmd("user:locked", &tracker, &blocked_gate,
-                                        &blocked_entered),
-                        [&](minikv::CommandResponse response) {
-                          ASSERT_TRUE(response.status.ok());
-                          blocked_done.set_value();
-                        })
+  ASSERT_TRUE(scheduler.Submit(
+                          MakeBlockingCmd("user:locked", &tracker, &blocked_gate,
+                                          &blocked_entered),
+                          [&](minikv::CommandResponse response) {
+                            ASSERT_TRUE(response.status.ok());
+                            blocked_done.set_value();
+                          })
                   .ok());
   blocked_entered_future.wait();
 
-  ASSERT_TRUE(runtime.Submit(
-                        MakeQuickCmd("user:locked"),
-                        [&](minikv::CommandResponse response) {
-                          ASSERT_TRUE(response.status.ok());
-                          quick_done.set_value();
-                        })
+  ASSERT_TRUE(scheduler.Submit(
+                          MakeQuickCmd("user:locked"),
+                          [&](minikv::CommandResponse response) {
+                            ASSERT_TRUE(response.status.ok());
+                            quick_done.set_value();
+                          })
                   .ok());
 
   EXPECT_EQ(quick_done_future.wait_for(std::chrono::milliseconds(150)),
@@ -432,9 +426,8 @@ TEST(WorkerRuntimeTest, SameKeyQuickTaskWaitsUntilBlockedTaskReleasesLock) {
             std::future_status::ready);
 }
 
-TEST(WorkerRuntimeTest, MetricsSnapshotTracksBacklogRejectionsAndInflight) {
-  minikv::KeyLockTable key_locks(128);
-  minikv::WorkerRuntime runtime(nullptr, &key_locks, 1, 1);
+TEST(SchedulerTest, MetricsSnapshotTracksBacklogRejectionsAndInflight) {
+  minikv::Scheduler scheduler(nullptr, 1, 1);
   Tracker tracker;
   Gate blocked_gate;
   std::promise<void> blocked_entered;
@@ -446,24 +439,24 @@ TEST(WorkerRuntimeTest, MetricsSnapshotTracksBacklogRejectionsAndInflight) {
   std::promise<void> queued_done;
   std::future<void> queued_done_future = queued_done.get_future();
 
-  ASSERT_TRUE(runtime.Submit(
-                        MakeBlockingCmd("user:metric", &tracker, &blocked_gate,
-                                        &blocked_entered),
-                        [&](minikv::CommandResponse response) {
-                          ASSERT_TRUE(response.status.ok());
-                          blocked_done.set_value();
-                        })
+  ASSERT_TRUE(scheduler.Submit(
+                          MakeBlockingCmd("user:metric", &tracker, &blocked_gate,
+                                          &blocked_entered),
+                          [&](minikv::CommandResponse response) {
+                            ASSERT_TRUE(response.status.ok());
+                            blocked_done.set_value();
+                          })
                   .ok());
 
   blocked_entered_future.wait();
 
-  minikv::MetricsSnapshot first = runtime.GetMetricsSnapshot();
+  minikv::MetricsSnapshot first = scheduler.GetMetricsSnapshot();
   ASSERT_EQ(first.worker_queue_depth.size(), 1U);
   EXPECT_GE(first.worker_queue_depth[0], 0U);
   EXPECT_EQ(first.worker_inflight, 1U);
   EXPECT_EQ(first.worker_rejections, 0U);
 
-  ASSERT_TRUE(runtime
+  ASSERT_TRUE(scheduler
                   .Submit(MakeBlockingCmd("user:metric:queued", &tracker, &blocked_gate),
                           [&](minikv::CommandResponse response) {
                             ASSERT_TRUE(response.status.ok());
@@ -472,14 +465,14 @@ TEST(WorkerRuntimeTest, MetricsSnapshotTracksBacklogRejectionsAndInflight) {
                   .ok());
 
   rocksdb::Status rejected =
-      runtime.Submit(MakeQuickCmd("user:metric:busy"),
-                     [&](minikv::CommandResponse response) {
-        ASSERT_TRUE(response.status.ok());
-        quick_done.set_value();
-      });
+      scheduler.Submit(MakeQuickCmd("user:metric:busy"),
+                       [&](minikv::CommandResponse response) {
+                         ASSERT_TRUE(response.status.ok());
+                         quick_done.set_value();
+                       });
   ASSERT_TRUE(rejected.IsBusy());
 
-  minikv::MetricsSnapshot second = runtime.GetMetricsSnapshot();
+  minikv::MetricsSnapshot second = scheduler.GetMetricsSnapshot();
   EXPECT_EQ(second.worker_rejections, 1U);
   EXPECT_EQ(second.worker_inflight, 2U);
 
@@ -491,7 +484,7 @@ TEST(WorkerRuntimeTest, MetricsSnapshotTracksBacklogRejectionsAndInflight) {
   blocked_done_future.wait();
   queued_done_future.wait();
 
-  minikv::MetricsSnapshot third = runtime.GetMetricsSnapshot();
+  minikv::MetricsSnapshot third = scheduler.GetMetricsSnapshot();
   EXPECT_EQ(third.worker_inflight, 0U);
   EXPECT_EQ(third.worker_rejections, 1U);
   EXPECT_EQ(quick_done_future.wait_for(std::chrono::milliseconds(10)),

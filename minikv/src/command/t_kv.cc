@@ -18,7 +18,7 @@ class PingCmd : public Cmd {
     return rocksdb::Status::OK();
   }
 
-  CommandResponse Do(DBEngine* /*engine*/) override {
+  CommandResponse Do(CommandContext* /*context*/) override {
     return MakeSimpleString("PONG");
   }
 };
