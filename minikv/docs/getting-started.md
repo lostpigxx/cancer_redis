@@ -1,17 +1,16 @@
 # MiniKV Getting Started
 
 This document is the best entrypoint if you have never read `minikv/` before.
-It is intentionally code-oriented and follows the current implementation rather
-than a future target design.
+It follows the current implementation rather than a future target design.
 
 ## Summary
 
-`minikv` is currently a small single-process key-value prototype built on top of
+`minikv` is a small single-process Redis-like prototype built on top of
 RocksDB.
 
-The main request path is:
+The main request path is now:
 
-`main -> Server -> RESP parser -> CmdFactory -> WorkerRuntime -> KeyLockTable -> Cmd -> DBEngine -> RocksDB`
+`main -> Server -> RESP parser -> CmdFactory -> MiniKV -> Scheduler -> Worker -> CommandContext -> HashModule -> Snapshot / WriteContext -> StorageEngine -> RocksDB`
 
 Current scope is intentionally narrow:
 
@@ -19,10 +18,11 @@ Current scope is intentionally narrow:
 - supported data type: hash only
 - deployment shape: one POSIX process exposing a TCP server
 
-The most important implementation fact is that current correctness depends more
-on the shared key-lock runtime than on RocksDB transactions. Requests for the
-same logical key cannot execute concurrently, even if different workers pick
-them up.
+The most important implementation fact is that two consistency concerns are now
+separated explicitly:
+
+- same-key write serialization comes from `Scheduler` plus `KeyLockTable`
+- multi-column-family consistent reads come from `Snapshot`
 
 ## Architecture And Class Map
 
@@ -43,16 +43,19 @@ Public facade.
 
 `MiniKV` owns an internal `Impl`, and `Impl` owns:
 
-- `DBEngine`
-- `KeyLockTable`
-- compatibility `WorkerRuntime`
+- `StorageEngine`
+- `NoopMutationHook`
+- `HashModule`
+- `CommandContext`
+- `Scheduler`
 
 Important behavior:
 
-- `MiniKV::Open()` opens the RocksDB-backed engine before publishing the facade
-- `Execute()` is synchronous and runs the `Cmd` directly under the shared key
-  lock
-- typed helpers `HSet()`, `HGetAll()`, and `HDel()` are thin wrappers around
+- `MiniKV::Open()` opens the RocksDB-backed storage engine before publishing the
+  facade
+- `Execute()` runs through `Scheduler::ExecuteInline()`
+- `Submit()` runs through the same shared `Scheduler`
+- typed helpers `HSet()`, `HGetAll()`, and `HDel()` remain thin wrappers around
   the unified command path
 
 ### `src/server/server.h` and `src/server/server.cc`
@@ -69,6 +72,12 @@ Network and connection-management layer.
 - writing encoded RESP responses
 - idle timeout and orderly shutdown
 
+Important current boundary:
+
+- `Server` no longer owns a separate worker runtime
+- it submits parsed commands back into `MiniKV::Submit()`
+- response ordering remains connection-local through request sequence numbers
+
 Key internal types:
 
 - `Connection`: per-client socket state, including read/write buffers and
@@ -77,25 +86,6 @@ Key internal types:
   original request sequence
 - `IOThreadState`: per-I/O-thread ownership bundle for connections, completion
   queue, wakeup pipe, and thread object
-
-### `src/server/resp_parser.h` and `src/server/resp_parser.cc`
-
-RESP parsing and response encoding.
-
-Current parser support is intentionally small:
-
-- request root must be a RESP array
-- array elements must be bulk strings
-
-Current encoder support:
-
-- simple strings
-- errors
-- integers
-- arrays of bulk strings
-
-This is enough for the current command set, but it is not a general RESP
-implementation.
 
 ### `src/command/cmd.*`, `cmd_create.*`, `cmd_factory.*`, `t_*.*`
 
@@ -108,58 +98,59 @@ This layer:
 - separates registration lookup from command creation
 - maps command names and `CommandType` values onto concrete `Cmd` classes
 - performs command-specific `DoInitial()` validation and parameter extraction
-- carries static command flags such as read/write and fast/slow
+- executes against `CommandContext`
 
 Current file split:
 
 - `cmd_factory.*`: registration and lookup only
 - `cmd_create.*`: build a `Cmd` from RESP parts or `CommandRequest`
-- `t_kv.*`: key-value style commands such as `PING`
-- `t_hash.*`: hash commands such as `HSET`, `HGETALL`, `HDEL`
+- `t_kv.*`: `PING`
+- `t_hash.*`: `HSET`, `HGETALL`, `HDEL`
 
-### `src/worker/worker.*` and `key_lock_table.*`
+Current execution split:
+
+- `PING` stays protocol-only
+- hash commands delegate to `HashModule`
+
+### `src/kernel/scheduler.*` and `src/worker/*`
 
 Concurrency core of the current design.
 
-`WorkerRuntime` owns:
+`Scheduler` owns:
 
 - one worker thread per configured worker
 - one bounded MPSC queue per worker
-- a shared `DBEngine*` used to execute queued `Cmd` objects
-- a shared `KeyLockTable*` used to serialize same-key execution
+- a shared `KeyLockTable`
+- round-robin plus probe admission control
+- queue depth / inflight / rejection metrics
+- both async submission and inline execution
 
-Admission rule:
+`Worker` owns:
 
-- pick a starting worker with round-robin
-- probe each worker queue once
-- reject only if every queue is full
+- one consumer thread
+- one bounded queue
+- exception isolation around command execution
 
 Correctness rule:
 
 - acquire the striped key lock for `cmd->RouteKey()`
-- execute `Cmd::Execute()`
+- execute `Cmd::Execute(context)`
 - release the key lock after completion
 
-Each concrete `Cmd` implements command semantics directly:
+This means same-key correctness no longer depends on any duplicated runtime
+structure. Both embedded and server paths use the same scheduler.
 
-- `PING` -> returns `PONG`
-- `HSET` -> calls `DBEngine::HSet()`
-- `HGETALL` -> calls `DBEngine::HGetAll()`
-- `HDEL` -> calls `DBEngine::HDel()`
+### `src/kernel/storage_engine.*`
 
-The `Cmd` base class provides the shared initialization and response-building
-helpers used by those command implementations.
+RocksDB integration layer.
 
-### `src/engine/db_engine.*`
-
-RocksDB integration and typed hash model.
-
-`DBEngine` is responsible for:
+`StorageEngine` is responsible for:
 
 - opening RocksDB
 - ensuring required column families exist
-- implementing hash operations
-- grouping storage updates with `WriteBatch`
+- exposing primitive `Get`, `Put`, `Delete`, `Write`
+- creating consistent `Snapshot` objects
+- providing iterator construction only to kernel helpers such as `Snapshot`
 
 Current column families:
 
@@ -167,10 +158,64 @@ Current column families:
 - `meta`
 - `hash`
 
-Effective data model:
+`src/engine/db_engine.h` is now only a compatibility alias to `StorageEngine`.
 
-- `meta`: one metadata record per logical key
-- `hash`: field/value data for one hash object
+### `src/kernel/snapshot.*`
+
+Read-consistency helper.
+
+`Snapshot` is responsible for:
+
+- pinning one RocksDB snapshot
+- serving `Get()` across one column family
+- serving `ScanPrefix()` across one column family
+- giving `HashModule` one consistent read view across `meta` and `hash`
+
+Modules should not reach directly for raw RocksDB iterators.
+
+### `src/kernel/write_context.*`
+
+Write batching helper.
+
+`WriteContext` is responsible for:
+
+- owning one `rocksdb::WriteBatch`
+- collecting `Put` and `Delete` operations for one logical mutation
+- committing that batch once
+
+It is the write-side companion to `Snapshot`.
+
+### `src/kernel/mutation_hook.h`
+
+Future extension hook.
+
+`MutationHook` is responsible for:
+
+- defining the hook interface for logical hash mutations
+- receiving both the logical mutation description and the active
+  `WriteContext`
+
+Current behavior:
+
+- `NoopMutationHook` is the active implementation
+- no Search or `FT.*` logic is attached yet
+
+### `src/types/hash/hash_module.*`
+
+Hash semantics layer.
+
+`HashModule` is responsible for:
+
+- `PutField()`
+- `ReadAll()`
+- `DeleteFields()`
+
+Current design rules:
+
+- reads always use `Snapshot`
+- writes always use `WriteContext`
+- hook call sites are present for future index or side-effect updates
+- the module does not expose old `DBEngine::HSet/HGetAll/HDel` style APIs
 
 ### `src/engine/key_codec.*`
 
@@ -189,12 +234,8 @@ Current logical encodings:
 - hash prefix: `h| + key_length + user_key + version`
 - hash data key: `hash_prefix + field`
 
-This encoding is what makes `HGETALL` possible through a prefix scan.
-
-### `src/common/thread_name.*`
-
-Tiny helper used by server and worker code to set thread names on supported
-platforms. It is useful for debugging but not part of the data path.
+This encoding still makes `HGETALL` possible through a prefix scan, but the
+scan now runs through `Snapshot`.
 
 ## Thread Model
 
@@ -202,14 +243,14 @@ The runtime currently has three kinds of threads:
 
 - one accept thread
 - `io_threads` I/O threads
-- `worker_threads` worker threads
+- `worker_threads` worker threads owned by the shared scheduler
 
 ### When threads are created
 
-- `MiniKV::Open()` constructs the shared key-lock table and the compatibility
-  async runtime used by `MiniKV::Submit()`
+- `MiniKV::Open()` constructs the shared scheduler and its worker threads
 - `Server::Start()` creates all I/O threads and then the accept thread
-- `Server::Start()` also creates the worker runtime used by the TCP path
+
+There is no longer one scheduler inside `MiniKV` and another inside `Server`.
 
 ### Accept thread
 
@@ -234,6 +275,7 @@ Each I/O thread exclusively owns:
 - per-connection read buffer
 - per-connection write buffer
 - per-connection pending request count
+- per-connection request / response sequence numbers
 - per-connection last-activity timestamp
 
 I/O threads use:
@@ -244,7 +286,7 @@ I/O threads use:
 The wakeup pipe is used when:
 
 - a new accepted connection is assigned to that I/O thread
-- a worker completion is pushed back to that I/O thread
+- a completed response is pushed back to that I/O thread
 - shutdown is requested
 
 ### Worker threads
@@ -256,166 +298,16 @@ Its loop is:
 1. wait on `condition_variable`
 2. pop one task from its local queue
 3. acquire the striped key lock for `RouteKey()`
-4. execute the command with `Cmd::Execute()`
-4. invoke the completion callback
+4. execute the command with `Cmd::Execute(context)`
+5. invoke the completion callback
 
-The callback runs on the worker thread and pushes the completed response into
-the owning I/O thread's `completed` queue. The worker then wakes that I/O
-thread through the pipe.
+## Read This Next
 
-### What this means in practice
+After this file, the best next documents are:
 
-- socket reads and writes happen only on I/O threads
-- command execution happens only on worker threads
-- there is no separate dispatcher thread
-- same-key safety comes from the shared key-lock table, not from per-key logic
-  inside the engine
-
-### Important current note
-
-One connection can pipeline requests for different keys. Different keys may run
-on different workers, but the server now assigns request sequence numbers and
-reorders completions before writing back to the socket. Cross-key pipelining on
-one connection therefore preserves submission order.
-
-## How To Read The Code Step By Step
-
-If you are reading the project for the first time, use this order instead of
-following file names alphabetically.
-
-### Step 1: Start from behavior, not implementation
-
-Read [`minikv/tests/server_test/server_test.cc`](../tests/server_test/server_test.cc).
-
-This gives you the external service contract first:
-
-- happy-path `PING` and hash lifecycle
-- fragmented request handling
-- malformed RESP recovery
-- concurrent clients across I/O threads
-- oversized request rejection
-
-This is the fastest way to build a mental model before reading internals.
-
-### Step 2: Read the top-level assembly
-
-Read:
-
-- [`minikv/src/main.cc`](../src/main.cc)
-- [`minikv/src/minikv.cc`](../src/minikv.cc)
-
-At this stage, answer only these questions:
-
-- what objects are created
-- in what order they are created
-- which object owns which subsystem
-
-Do not dive into `server.cc` yet.
-
-### Step 3: Follow one request through the server
-
-Read [`minikv/src/server/server.cc`](../src/server/server.cc) in this order:
-
-1. `Start()`
-2. `AcceptLoop()`
-3. `RunIOThread()`
-4. `HandleReadable()`
-5. completion callback inside `HandleReadable()`
-6. `DrainIOState()`
-7. `HandleWritable()`
-
-Goal:
-
-- understand how a connection is assigned
-- understand how bytes become requests
-- understand how worker results get back to the same connection
-
-Also read [`minikv/src/server/resp_parser.cc`](../src/server/resp_parser.cc)
-next to it so the read path makes sense.
-
-### Step 4: Read command shaping and worker execution
-
-Read these files together:
-
-- [`minikv/src/command/cmd_create.cc`](../src/command/cmd_create.cc)
-- [`minikv/src/command/cmd_factory.cc`](../src/command/cmd_factory.cc)
-- [`minikv/src/command/t_kv.cc`](../src/command/t_kv.cc)
-- [`minikv/src/command/t_hash.cc`](../src/command/t_hash.cc)
-- [`minikv/src/worker/worker.cc`](../src/worker/worker.cc)
-- [`minikv/src/worker/key_lock_table.cc`](../src/worker/key_lock_table.cc)
-
-At this stage, answer these questions:
-
-- where does RESP input become a concrete `Cmd`
-- where does execution become asynchronous
-- why do operations on the same key serialize even across different workers
-
-### Step 5: Read the storage model
-
-Read:
-
-- [`minikv/src/engine/db_engine.cc`](../src/engine/db_engine.cc)
-- [`minikv/src/engine/key_codec.cc`](../src/engine/key_codec.cc)
-
-Focus on:
-
-- why `meta` and `hash` are separate column families
-- how metadata is encoded
-- how `HSET`, `HGETALL`, and `HDEL` map to RocksDB primitives
-
-The key point is to understand one logical hash object as:
-
-- one metadata record in `meta`
-- many field/value records in `hash`
-
-### Step 6: Use unit tests to confirm the concurrency model
-
-Read [`minikv/tests/command_test/hash_command_test.cc`](../tests/command_test/hash_command_test.cc).
-
-These tests tell you what the current code considers guaranteed:
-
-- same-key concurrent updates remain consistent
-- same-field concurrent overwrites do not duplicate fields
-- different keys can proceed independently
-- worker runtime preserves same-key serialization and allows different-key
-  parallelism
-- backpressure is per worker queue, not global
-
-## Checkpoints While Reading
-
-Use these tests as checkpoints for your understanding.
-
-### `PingAndBasicHashLifecycle`
-
-Map one command from socket read all the way to RocksDB write and back to socket
-response.
-
-### `FragmentedRespInputAndErrorPath`
-
-Confirm that `RespParser` is incremental and that malformed input does not
-poison the next command.
-
-### `ConcurrentClientsAcrossIoThreads`
-
-Confirm the division of labor between the accept thread and I/O threads.
-
-### `SameKeyConcurrentUpdatesStayConsistent`
-
-Confirm that current same-key correctness comes from the shared key lock, not
-from a transactional command layer.
-
-### `RejectsOverloadedWorkerQueue`
-
-Confirm that overload handling is local to one worker queue, which means hot-key
-traffic can fail even if other workers are idle.
-
-## Reading Defaults
-
-When learning this codebase, keep these defaults in mind:
-
-- prefer understanding the request path before reading individual helpers
-- do not project full Redis semantics onto this code; it implements only a
-  small hash-oriented subset
-- the two boundaries that matter most are:
-  - `Server` owns network progress and connection ownership
-  - `WorkerRuntime` plus `KeyLockTable` own execution concurrency
+1. [architecture.md](./architecture.md)
+2. [layers/facade.md](./layers/facade.md)
+3. [layers/server.md](./layers/server.md)
+4. [layers/command.md](./layers/command.md)
+5. [layers/worker.md](./layers/worker.md)
+6. [layers/engine.md](./layers/engine.md)

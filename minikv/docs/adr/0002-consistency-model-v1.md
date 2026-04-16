@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted on 2026-04-16.
+Accepted on 2026-04-17.
 
 ## Context
 
@@ -15,10 +15,10 @@ implementation actually provides. It is scoped to the current command set:
 The current consistency model is intentionally narrow and should be read as a
 baseline contract, not as a general Redis-compatible transaction model.
 
-### Same-Key Consistency Depends On `KeyLockTable`
+### Same-Key Consistency Depends On `Scheduler` And `KeyLockTable`
 
 For commands with a route key, correctness for same-key concurrency depends on
-`KeyLockTable` in the worker layer:
+the shared `Scheduler` plus `KeyLockTable`:
 
 - `HSET`, `HGETALL`, and `HDEL` all route on the user key
 - worker threads acquire a striped mutex derived from that key before executing
@@ -26,25 +26,39 @@ For commands with a route key, correctness for same-key concurrency depends on
 - same-key requests therefore execute serially even when different workers pick
   them up
 
-This means current same-key consistency is provided by keyed execution
-serialization, not by RocksDB transactions or multi-statement snapshots.
+This means current same-key consistency is still provided by keyed execution
+serialization, not by RocksDB transactions or multi-key locking.
 
-### Reads And Writes Are Not Snapshot-Isolated
+### Logical Hash Reads Use One Snapshot Across `meta` And `hash`
 
-Current reads do not use RocksDB snapshots:
+Current hash reads now use RocksDB snapshots:
 
-- `HGETALL` reads metadata and then scans the `hash` column family with normal
-  `ReadOptions`
-- no snapshot handle is acquired for the metadata read plus iterator scan
-- no request-level snapshot is shared across separate operations
+- `HashModule::ReadAll()` acquires one `Snapshot`
+- metadata lookup and `hash` prefix scan share that same snapshot handle
+- modules do not reach directly for raw iterators
 
-Current writes are also not snapshot-based:
+This gives current hash reads a consistent multi-column-family view for one
+logical hash operation.
 
-- `HSET` and `HDEL` perform read-modify-write flows in process memory
-- they rely on same-key worker locking to avoid conflicting same-key updates
+This is still not general snapshot isolation:
 
-As a result, the current model is not snapshot isolation, not MVCC, and not a
-general-purpose read-consistent view across keys.
+- no snapshot is shared across multiple commands
+- no cross-key read transaction exists
+- the public API does not expose long-lived snapshots
+
+### Writes Use `WriteContext` But Still Depend On Same-Key Serialization
+
+Current writes are grouped by one logical `WriteContext`:
+
+- `HSET` and `HDEL` build one `rocksdb::WriteBatch` per logical mutation
+- mutation hooks, if any, must append into that same batch
+- the batch is committed once after the logical mutation is fully prepared
+
+This does not remove the need for keyed serialization:
+
+- read-modify-write flows still rely on same-key scheduler locking to avoid
+  conflicting same-key updates
+- there is still no multi-key atomicity
 
 ### Multi-Key Operations Have No Atomicity Guarantee
 
@@ -57,7 +71,20 @@ Operationally:
 - there is no mechanism for atomically reading or updating multiple keys
 - any future multi-key command would need an explicit new execution contract
 
-### `version` And `expire_at_ms` Are Reserved Fields Only
+### `MutationHook` Is An Empty Extension Point
+
+The write path now has a formal mutation hook interface:
+
+- `HashMutation` describes logical hash updates
+- `MutationHook::OnHashMutation()` receives both the mutation and the active
+  `WriteContext`
+
+Current behavior:
+
+- the only implementation is `NoopMutationHook`
+- no Search, module, or `FT.*` behavior is attached yet
+
+### `version` And `expire_at_ms` Are Still Reserved Fields Only
 
 The current metadata schema contains `version` and `expire_at_ms`, but they do
 not currently provide active semantics:
@@ -73,10 +100,11 @@ baseline, not as implemented versioning or expiration features.
 ## Consequences
 
 The current system is safe for its small single-key hash command set, but its
-consistency boundary is narrow:
+consistency boundary remains intentionally narrow:
 
-- same-key behavior relies on `KeyLockTable`
-- reads and writes are not snapshot-isolated
+- same-key behavior relies on scheduler-layer keyed serialization
+- logical hash reads use one snapshot across `meta` and `hash`
+- writes use one write batch per logical mutation
 - multi-key atomicity does not exist
 - reserved metadata fields must not be documented as active semantics
 

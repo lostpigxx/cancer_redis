@@ -41,9 +41,11 @@ The baseline test matrix is:
 - `minikv_cmd_test`
 - `minikv_command_registry_test`
 - `minikv_hash_test`
+- `minikv_hash_module_test`
 - `minikv_reply_encode_test`
+- `minikv_scheduler_test`
 - `minikv_server_test`
-- `minikv_worker_test`
+- `minikv_snapshot_test`
 
 All of these are expected to run through:
 
@@ -98,6 +100,6 @@ The current baseline applies only to the current implementation surface:
 Explicitly out of scope for this baseline:
 
 - non-hash data types
-- snapshot semantics
+- general multi-command snapshot isolation
 - module platform behavior
 - search commands including `FT.*`

@@ -1,19 +1,21 @@
-# MiniKV Worker Layer
+# MiniKV Scheduler And Worker Layer
 
 ## Scope
 
 This layer is defined by:
 
+- `src/kernel/scheduler.h`
+- `src/kernel/scheduler.cc`
 - `src/worker/key_lock_table.h`
 - `src/worker/key_lock_table.cc`
 - `src/worker/worker.h`
 - `src/worker/worker.cc`
 
-It provides asynchronous keyed execution for command requests.
+It provides keyed execution for command requests.
 
 ## Responsibilities
 
-The worker layer owns:
+The scheduler/worker split owns:
 
 - worker thread creation and teardown
 - per-worker bounded MPSC queues
@@ -21,6 +23,8 @@ The worker layer owns:
 - striped key locking for same-key serialization
 - queue-depth backpressure
 - exception isolation around command execution
+- scheduler metrics
+- one shared execution path for both embedded and server callers
 
 It does not own socket I/O or RocksDB schema decisions.
 
@@ -28,7 +32,7 @@ It does not own socket I/O or RocksDB schema decisions.
 
 Request admission is decoupled from correctness:
 
-- `WorkerRuntime` chooses a starting worker with round-robin
+- `Scheduler` chooses a starting worker with round-robin
 - if that queue is full, it probes the remaining workers once
 - the first worker that accepts the task owns execution
 - before `Cmd::Execute()` runs, the worker acquires one striped lock derived
@@ -38,6 +42,11 @@ This gives the current prototype its main safety property:
 
 - requests for the same key cannot execute concurrently, even if they are
   enqueued onto different workers
+
+The shared scheduler also owns `ExecuteInline()`:
+
+- synchronous embedded execution still goes through the same key-lock contract
+- there is no separate compatibility runtime anymore
 
 ## Queueing Model
 
@@ -53,7 +62,7 @@ Admission control is local to a worker queue via
 
 If the initially selected worker queue is full:
 
-- the runtime probes the remaining workers once
+- the scheduler probes the remaining workers once
 - if every queue is full, the request is rejected with
   `Busy("worker queue full")`
 
@@ -68,18 +77,19 @@ If the initially selected worker queue is full:
 
 ## Current Design Strengths
 
-- Same-key serialization no longer depends on fixed worker routing.
+- Same-key serialization is shared by both embedded and server execution paths.
 - Different keys can scale across workers.
 - The execution model is easy to reason about.
 - Worker failures are converted into error responses instead of crashing the
   request path directly.
+- Scheduler metrics are exposed without duplicating runtime ownership in the
+  server.
 
 ## Current Design Risks
 
 ### Hot-Key Saturation
 
-Hot keys now serialize on one striped lock rather than one fixed worker queue,
-but they can still dominate one stripe and reduce effective parallelism.
+Hot keys still serialize on one striped lock and can dominate one stripe.
 
 ### Stripe Collisions
 
@@ -88,12 +98,12 @@ but it introduces avoidable contention under unlucky key distributions.
 
 ### No Cross-Key Ordering Or Atomicity
 
-The worker layer makes no attempt to coordinate related requests that span
-multiple keys. That is acceptable today, but it is a hard boundary for future
-command growth.
+The scheduler layer makes no attempt to coordinate related requests that span
+multiple keys. That is acceptable today, but it is still a hard boundary for
+future command growth.
 
 ## Current Design Conclusion
 
-The worker layer is still the main concurrency boundary of the system, but the
-correctness invariant now lives in explicit key locking instead of fixed worker
-routing.
+The current concurrency boundary is no longer a standalone worker runtime type.
+It is a shared scheduler plus worker pool, with keyed serialization still living
+in explicit `KeyLockTable` locking.

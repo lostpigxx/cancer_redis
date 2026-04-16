@@ -20,10 +20,10 @@ Current documents:
   and connection lifecycle.
 - [layers/command.md](./layers/command.md): command parsing, dispatch, and
   execution path.
-- [layers/worker.md](./layers/worker.md): keyed worker routing, queueing, and
-  backpressure model.
-- [layers/engine.md](./layers/engine.md): RocksDB storage model, column
-  families, key encoding, and hash data semantics.
+- [layers/worker.md](./layers/worker.md): shared scheduler, keyed worker
+  execution, queueing, and backpressure model.
+- [layers/engine.md](./layers/engine.md): storage primitives, snapshots, write
+  contexts, hooks, key encoding, and hash data semantics.
 - [perf/baseline.md](./perf/baseline.md): baseline validation and smoke test
   workflow for the standalone project.
 

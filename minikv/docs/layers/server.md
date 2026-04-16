@@ -22,11 +22,11 @@ The server layer owns:
 - RESP request parsing
 - response encoding
 - connection idle timeout and shutdown behavior
-- worker runtime lifetime for the TCP path
+- response reordering for pipelined requests
 
-The server is not responsible for command semantics or storage layout. It hands
-those off to lower layers by constructing `Cmd` objects and submitting them to
-its own `WorkerRuntime`.
+The server is not responsible for command semantics, scheduler ownership, or
+storage layout. It constructs `Cmd` objects and submits them back into
+`MiniKV::Submit()`.
 
 ## Threading Model
 
@@ -34,7 +34,7 @@ The runtime splits into:
 
 - one accept thread
 - N I/O threads
-- M worker threads owned directly by `Server`
+- M worker threads owned by the shared `Scheduler` inside `MiniKV`
 
 Each accepted connection is assigned to one I/O thread. That I/O thread owns:
 
@@ -57,7 +57,7 @@ Within one I/O thread, the current path is:
 3. parse complete RESP arrays
 4. turn parts into `Cmd`
 5. assign a per-connection request sequence
-6. submit async work to `WorkerRuntime`
+6. submit async work to `MiniKV::Submit()`
 7. receive async completion back on the same I/O thread
 8. reorder completions by request sequence
 9. encode RESP response
@@ -93,29 +93,28 @@ implementation.
 - One I/O thread owns one connection at a time.
 - Fragmented request input is supported.
 - Slow clients do not automatically block all workers.
-- Connection-local RESP pipeline order is preserved even when different requests
-  complete on different workers.
+- Connection-local RESP pipeline order is preserved even when different
+  requests complete on different workers.
+- The server no longer has to keep a second runtime in sync with `MiniKV`.
 
 ## Current Design Risks
 
 ### Observability
 
-`Server` now exports a process-internal metrics API via
-`Server::GetMetricsSnapshot()`. The snapshot is in-memory only for now (no
-network status endpoint yet), and it is safe to sample from control paths or
-tests without touching the RESP data plane.
+`Server` exports a process-internal metrics API via
+`Server::GetMetricsSnapshot()`. The snapshot is in-memory only for now.
 
 Metric definitions and sampling points:
 
 - `worker_queue_depth[i]`:
-  - definition: current backlog (`head - tail`) of worker queue `i`
-  - sampled when `GetMetricsSnapshot()` calls `WorkerRuntime` aggregation
+  - definition: current backlog (`head - tail`) of scheduler worker queue `i`
+  - sampled when `GetMetricsSnapshot()` calls `MiniKV::scheduler()`
 - `worker_rejections`:
-  - definition: total worker submission rejections (`Busy("worker queue full")`)
-  - sampled from `WorkerRuntime::rejected_requests_`
+  - definition: total scheduler submission rejections
+  - sampled from `Scheduler::rejected_requests_`
 - `worker_inflight`:
-  - definition: number of accepted worker tasks not yet completed
-  - incremented on successful enqueue, decremented in completion callback
+  - definition: number of accepted scheduler tasks not yet completed
+  - sampled from `Scheduler::inflight_requests_`
 - `active_connections`:
   - definition: currently open TCP connections
   - sampled from `Server::connection_count_`
@@ -132,12 +131,8 @@ Metric definitions and sampling points:
   - definition: cumulative connections closed due to poll/read/write errors
   - marked in `RunIOThread()` failure branches, counted in `CloseConnection()`
 - `parse_errors`:
-  - definition: RESP parse failures (malformed request payloads)
+  - definition: RESP parse failures
   - incremented in `Server::HandleReadable()` when parser returns an error
-
-This gives a minimal viable export surface for overload/backpressure and
-connection-health diagnostics. A network `/status` endpoint can be layered on
-top later by serializing the same snapshot.
 
 ### Event Loop Scalability
 
@@ -153,5 +148,6 @@ shutdown coordination degrades.
 
 ## Current Design Conclusion
 
-The server layer is a compact prototype transport. It is good enough to exercise
-the storage and command path, but it is not yet a mature protocol runtime.
+The server layer is still a compact prototype transport. The main improvement of
+the current split is that scheduling and same-key correctness are now shared
+with the embedded path instead of being duplicated inside the server.

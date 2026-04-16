@@ -2,13 +2,13 @@
 
 ## Status
 
-Accepted on 2026-04-16.
+Accepted on 2026-04-17.
 
 ## Context
 
 This ADR freezes the current `minikv` implementation boundaries as they exist in
-the codebase today. It is intentionally descriptive. It does not propose future
-behavior.
+the codebase today after the search-prep kernel split. It is intentionally
+descriptive. It does not propose future behavior.
 
 ## Current Supported Commands
 
@@ -38,13 +38,14 @@ The current runtime is split into three thread roles:
 - one accept thread owns `accept()` on the listening socket
 - `io_threads` I/O threads own client sockets, parse RESP requests, buffer
   writes, and preserve per-connection response order
-- `worker_threads` worker threads execute commands against `DBEngine`
+- `worker_threads` worker threads execute commands through the shared
+  `Scheduler`
 
 Execution routing rules today:
 
 - each accepted connection is assigned to one I/O thread
 - parsed requests are converted into `Cmd` instances on that I/O thread
-- the I/O thread submits work to `WorkerRuntime`
+- both embedded and server paths submit work into one shared `Scheduler`
 - worker selection is queue-oriented round-robin with probing for a queue that
   still has capacity
 - same-key serialization depends on `KeyLockTable`, which locks by a striped
@@ -52,9 +53,8 @@ Execution routing rules today:
 - responses are shipped back to the owning I/O thread and reordered by request
   sequence before writing to the socket
 
-This means socket progress and command execution are separated, but same-key
-correctness currently depends on keyed worker-layer locking rather than
-multi-key storage transactions.
+This means socket progress and command execution remain separated, but there is
+no longer a duplicated runtime structure between `MiniKV` and `Server`.
 
 ## Current Response Model
 
@@ -79,13 +79,22 @@ module-defined custom reply types.
 
 ## Current Storage Model
 
-`DBEngine` currently opens three RocksDB column families:
+The active kernel split is:
+
+- `StorageEngine`: RocksDB open path, column-family handles, primitive
+  `Get/Put/Delete/Write`, and snapshot creation
+- `Snapshot`: consistent read view used by logical multi-column-family reads
+- `WriteContext`: one logical write batch per mutation
+- `HashModule`: hash semantics on top of storage primitives
+- `MutationHook`: hook interface for future secondary effects, currently no-op
+
+`StorageEngine` currently opens three RocksDB column families:
 
 - `default`
 - `meta`
 - `hash`
 
-The logical model is hash-only:
+The logical model is still hash-only:
 
 - the `meta` column family stores per-key metadata
 - the `hash` column family stores hash field/value entries
@@ -102,12 +111,17 @@ Current metadata fields are:
 
 Current behavior is limited to hash operations:
 
-- `HSET` reads metadata, validates the key type, updates the size counter when a
-  new field is inserted, and writes metadata plus field value in one
-  `WriteBatch`
-- `HGETALL` reads metadata and scans the `hash` column family by prefix
-- `HDEL` probes requested fields one by one, deletes existing field keys, and
-  updates or removes metadata in one `WriteBatch`
+- `HSET` reads metadata and field existence through one `Snapshot`, writes
+  metadata plus field value through one `WriteContext`, and passes through the
+  mutation hook call site before commit
+- `HGETALL` reads metadata and scans the `hash` column family through one
+  `Snapshot`
+- `HDEL` reads metadata and field existence through one `Snapshot`, deletes
+  existing field keys and updates or removes metadata through one
+  `WriteContext`, and passes through the mutation hook call site before commit
+
+`src/engine/db_engine.h` remains only as a compatibility alias to
+`StorageEngine`.
 
 ## Current Non-Supported Items
 
@@ -116,7 +130,6 @@ The following are explicitly not supported in the current baseline:
 - non-hash data types such as string, list, set, zset, stream, or generic KV
 - complex reply shapes beyond simple string, integer, flat bulk-string array,
   and error
-- snapshot semantics for reads or for request-level isolation
 - module platform behavior, module loading, or module-defined commands
 - search functionality, including any `FT.*` command family
 
@@ -125,8 +138,8 @@ Additional current limitations:
 - no TTL or expiration behavior is enforced
 - no cross-key atomicity exists
 - no transaction interface exists
-- no replication, clustering, persistence modes beyond local RocksDB, or module
-  API surface exists
+- no replication, clustering, or persistence modes beyond local RocksDB exist
+- mutation hooks do not yet have any non-noop implementation
 
 ## Consequences
 

@@ -22,7 +22,8 @@ It maps parsed RESP command parts into executable operations.
 The command layer owns three steps:
 
 - turn parsed RESP parts or compatibility `CommandRequest` values into `Cmd`
-- execute command semantics against `DBEngine`
+- validate arguments and derive `RouteKey()`
+- execute command semantics against `CommandContext`
 
 This keeps the server layer unaware of individual command rules.
 
@@ -45,16 +46,16 @@ implementations from:
 
 Current command implementations are grouped by family:
 
-- `PING`
-- `HSET`
-- `HGETALL`
-- `HDEL`
-
 - `t_kv.*`: `PING`
 - `t_hash.*`: `HSET`, `HGETALL`, `HDEL`
 
 Each command validates its own input in `DoInitial()`, extracts the parameters
-it needs, and runs the actual engine call in `Do()`.
+it needs, and runs the actual operation in `Do(context)`.
+
+Current execution split:
+
+- `PING` does not depend on storage
+- hash commands delegate to `HashModule` through `CommandContext`
 
 Each registration also carries static flags:
 
@@ -67,33 +68,36 @@ Each registration also carries static flags:
 
 - The command layer is small and easy to extend for additional single-key
   commands.
-- Validation and execution now live in the same command object.
-- Command output is already normalized into one internal response shape before
-  reaching the server encoder.
+- Validation and execution live in the same command object.
+- `CommandContext` keeps command execution decoupled from any one storage or
+  type implementation class.
+- Command output is normalized into one internal response shape before reaching
+  the server encoder.
 
 ## Current Design Risks
 
 ### Protocol-Shaped Core Types
 
-`CommandResponse` is already close to RESP instead of being a transport-neutral
+`CommandResponse` is still close to RESP instead of being a transport-neutral
 result type. That keeps the server simple but couples command execution to the
 wire format.
 
 ### Limited Growth Path For Richer Semantics
 
 The current command path is well suited to straightforward single-key commands.
-It does not yet define how to handle:
+It still does not define how to handle:
 
 - cross-key ordering
 - multi-step atomicity
 - richer result types
 - conditional updates
 
-As command coverage grows, the main open design question is how much those
-command flags should influence scheduling beyond today's key-lock runtime.
+As command coverage grows, the main open design question is how much command
+metadata should influence scheduling beyond the current same-key lock model.
 
 ## Current Design Conclusion
 
-Today, the command layer is appropriately small and direct. The next design
-pressure point is deciding when command metadata should become active scheduling
-policy instead of remaining registration-time description.
+Today, the command layer is small and direct. The main improvement of the
+current split is that command objects no longer call storage-oriented DB
+semantics directly; they execute against a context that can route to typed
+modules and storage primitives separately.
