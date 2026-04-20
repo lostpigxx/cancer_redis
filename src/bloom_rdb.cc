@@ -4,146 +4,130 @@
 
 #include <cstring>
 
-RedisModuleType* BFType = nullptr;
+RedisModuleType* BloomType = nullptr;
 
-void* BFRdbLoad(RedisModuleIO* rdb, int encver) {
-  if (encver > kBFCurrentEncver) {
+void* RdbLoadBloom(RedisModuleIO* rdb, int encver) {
+  if (encver > kCurrentEncVer) return nullptr;
+
+  auto* filter = static_cast<ScalingBloomFilter*>(RMCalloc(1, sizeof(ScalingBloomFilter)));
+  if (!filter) return nullptr;
+
+  filter->totalItems = RedisModule_LoadUnsigned(rdb);
+  filter->numLayers = static_cast<size_t>(RedisModule_LoadUnsigned(rdb));
+
+  filter->flags = (encver >= kEncVerWithFlags)
+    ? static_cast<unsigned>(RedisModule_LoadUnsigned(rdb))
+    : (kUse64Bit | kNoRound);
+
+  filter->expansionFactor = (encver >= kEncVerWithExpansion)
+    ? static_cast<unsigned>(RedisModule_LoadUnsigned(rdb))
+    : 2;
+
+  if (filter->numLayers == 0) {
+    RMFree(filter);
     return nullptr;
   }
 
-  auto* chain = static_cast<SBChain*>(RMCalloc(1, sizeof(SBChain)));
-  if (!chain) return nullptr;
-
-  chain->size = RedisModule_LoadUnsigned(rdb);
-  chain->nfilters = static_cast<size_t>(RedisModule_LoadUnsigned(rdb));
-
-  if (encver >= kBFMinOptionsEnc) {
-    chain->options = static_cast<unsigned>(RedisModule_LoadUnsigned(rdb));
-  } else {
-    chain->options = kBloomOptForce64 | kBloomOptNoRound;
-  }
-
-  if (encver >= kBFMinGrowthEnc) {
-    chain->growth = static_cast<unsigned>(RedisModule_LoadUnsigned(rdb));
-  } else {
-    chain->growth = 2;
-  }
-
-  if (chain->nfilters == 0) {
-    RMFree(chain);
+  filter->layers = static_cast<FilterLayer*>(RMCalloc(filter->numLayers, sizeof(FilterLayer)));
+  if (!filter->layers) {
+    RMFree(filter);
     return nullptr;
   }
 
-  chain->filters = static_cast<SBLink*>(RMCalloc(chain->nfilters, sizeof(SBLink)));
-  if (!chain->filters) {
-    RMFree(chain);
-    return nullptr;
-  }
+  for (size_t i = 0; i < filter->numLayers; i++) {
+    FilterLayer& layer = filter->layers[i];
+    std::memset(&layer, 0, sizeof(FilterLayer));
 
-  for (size_t i = 0; i < chain->nfilters; i++) {
-    SBLink& link = chain->filters[i];
-    std::memset(&link, 0, sizeof(SBLink));
-
-    link.inner.entries = RedisModule_LoadUnsigned(rdb);
-    link.inner.error = RedisModule_LoadDouble(rdb);
-    link.inner.hashes = static_cast<uint32_t>(RedisModule_LoadUnsigned(rdb));
-    link.inner.bpe = RedisModule_LoadDouble(rdb);
-    link.inner.bits = RedisModule_LoadUnsigned(rdb);
-    link.inner.n2 = static_cast<uint8_t>(RedisModule_LoadUnsigned(rdb));
-
-    if (link.inner.bits > 0) {
-      link.inner.bytes = link.inner.bits / 8;
-    } else {
-      link.inner.bytes = 0;
-    }
-
-    link.inner.force64 = (chain->options & kBloomOptForce64) ? 1 : 0;
+    layer.bloom.capacity = RedisModule_LoadUnsigned(rdb);
+    layer.bloom.fpRate = RedisModule_LoadDouble(rdb);
+    layer.bloom.hashCount = static_cast<uint32_t>(RedisModule_LoadUnsigned(rdb));
+    layer.bloom.bitsPerEntry = RedisModule_LoadDouble(rdb);
+    layer.bloom.totalBits = RedisModule_LoadUnsigned(rdb);
+    layer.bloom.log2Bits = static_cast<uint8_t>(RedisModule_LoadUnsigned(rdb));
+    layer.bloom.dataSize = (layer.bloom.totalBits > 0) ? (layer.bloom.totalBits / 8) : 0;
+    layer.bloom.prefer64 = (filter->flags & kUse64Bit) ? 1 : 0;
 
     size_t bufLen = 0;
     char* buf = RedisModule_LoadStringBuffer(rdb, &bufLen);
     if (buf && bufLen > 0) {
-      link.inner.bf = static_cast<uint8_t*>(RMAlloc(link.inner.bytes));
-      if (!link.inner.bf) {
+      layer.bloom.bitArray = static_cast<uint8_t*>(RMAlloc(layer.bloom.dataSize));
+      if (!layer.bloom.bitArray) {
         RedisModule_Free(buf);
-        goto error;
+        goto cleanup;
       }
-      size_t copyLen = bufLen < link.inner.bytes ? bufLen : link.inner.bytes;
-      std::memcpy(link.inner.bf, buf, copyLen);
+      std::memcpy(layer.bloom.bitArray, buf,
+                   bufLen < layer.bloom.dataSize ? bufLen : layer.bloom.dataSize);
       RedisModule_Free(buf);
     } else {
       if (buf) RedisModule_Free(buf);
-      link.inner.bf = static_cast<uint8_t*>(RMCalloc(link.inner.bytes, 1));
-      if (!link.inner.bf) goto error;
+      layer.bloom.bitArray = static_cast<uint8_t*>(RMCalloc(layer.bloom.dataSize, 1));
+      if (!layer.bloom.bitArray) goto cleanup;
     }
 
-    link.size = static_cast<size_t>(RedisModule_LoadUnsigned(rdb));
+    layer.itemCount = static_cast<size_t>(RedisModule_LoadUnsigned(rdb));
   }
 
-  return chain;
+  return filter;
 
-error:
-  for (size_t j = 0; j < chain->nfilters; j++) {
-    if (chain->filters[j].inner.bf) {
-      RMFree(chain->filters[j].inner.bf);
+cleanup:
+  for (size_t j = 0; j < filter->numLayers; j++) {
+    if (filter->layers[j].bloom.bitArray) {
+      RMFree(filter->layers[j].bloom.bitArray);
     }
   }
-  RMFree(chain->filters);
-  RMFree(chain);
+  RMFree(filter->layers);
+  RMFree(filter);
   return nullptr;
 }
 
-void BFRdbSave(RedisModuleIO* rdb, void* value) {
-  auto* chain = static_cast<SBChain*>(value);
+void RdbSaveBloom(RedisModuleIO* rdb, void* value) {
+  auto* filter = static_cast<ScalingBloomFilter*>(value);
 
-  RedisModule_SaveUnsigned(rdb, chain->size);
-  RedisModule_SaveUnsigned(rdb, static_cast<uint64_t>(chain->nfilters));
-  RedisModule_SaveUnsigned(rdb, chain->options);
-  RedisModule_SaveUnsigned(rdb, chain->growth);
+  RedisModule_SaveUnsigned(rdb, filter->totalItems);
+  RedisModule_SaveUnsigned(rdb, static_cast<uint64_t>(filter->numLayers));
+  RedisModule_SaveUnsigned(rdb, filter->flags);
+  RedisModule_SaveUnsigned(rdb, filter->expansionFactor);
 
-  for (size_t i = 0; i < chain->nfilters; i++) {
-    const SBLink& link = chain->filters[i];
-    RedisModule_SaveUnsigned(rdb, link.inner.entries);
-    RedisModule_SaveDouble(rdb, link.inner.error);
-    RedisModule_SaveUnsigned(rdb, link.inner.hashes);
-    RedisModule_SaveDouble(rdb, link.inner.bpe);
-    RedisModule_SaveUnsigned(rdb, link.inner.bits);
-    RedisModule_SaveUnsigned(rdb, link.inner.n2);
-    RedisModule_SaveStringBuffer(rdb, reinterpret_cast<const char*>(link.inner.bf),
-                                  link.inner.bytes);
-    RedisModule_SaveUnsigned(rdb, link.size);
+  for (size_t i = 0; i < filter->numLayers; i++) {
+    const FilterLayer& layer = filter->layers[i];
+    RedisModule_SaveUnsigned(rdb, layer.bloom.capacity);
+    RedisModule_SaveDouble(rdb, layer.bloom.fpRate);
+    RedisModule_SaveUnsigned(rdb, layer.bloom.hashCount);
+    RedisModule_SaveDouble(rdb, layer.bloom.bitsPerEntry);
+    RedisModule_SaveUnsigned(rdb, layer.bloom.totalBits);
+    RedisModule_SaveUnsigned(rdb, layer.bloom.log2Bits);
+    RedisModule_SaveStringBuffer(rdb, reinterpret_cast<const char*>(layer.bloom.bitArray),
+                                  layer.bloom.dataSize);
+    RedisModule_SaveUnsigned(rdb, layer.itemCount);
   }
 }
 
-void BFAofRewrite(RedisModuleIO* aof, RedisModuleString* key, void* value) {
-  auto* chain = static_cast<SBChain*>(value);
+void AofRewriteBloom(RedisModuleIO* aof, RedisModuleString* key, void* value) {
+  auto* filter = static_cast<ScalingBloomFilter*>(value);
 
-  size_t hdrSize = SBChainDumpHeaderSize(chain);
-  auto* hdrBuf = static_cast<char*>(RMAlloc(hdrSize));
-  SBChainDumpHeader(chain, hdrBuf);
+  size_t hdrBytes = ComputeHeaderSize(filter);
+  auto* hdrBuf = static_cast<char*>(RMAlloc(hdrBytes));
+  SerializeHeader(filter, hdrBuf);
 
-  RedisModule_EmitAOF(aof, "BF.LOADCHUNK", "slb",
-                       key, (long long)1, hdrBuf, hdrSize);
+  RedisModule_EmitAOF(aof, "BF.LOADCHUNK", "slb", key, (long long)1, hdrBuf, hdrBytes);
   RMFree(hdrBuf);
 
-  long long iter = 2;
-  for (size_t i = 0; i < chain->nfilters; i++) {
-    const SBLink& link = chain->filters[i];
-    RedisModule_EmitAOF(aof, "BF.LOADCHUNK", "slb",
-                         key, iter,
-                         reinterpret_cast<const char*>(link.inner.bf),
-                         link.inner.bytes);
-    iter++;
+  for (size_t i = 0; i < filter->numLayers; i++) {
+    const FilterLayer& layer = filter->layers[i];
+    RedisModule_EmitAOF(aof, "BF.LOADCHUNK", "slb", key,
+                         static_cast<long long>(i + 2),
+                         reinterpret_cast<const char*>(layer.bloom.bitArray),
+                         layer.bloom.dataSize);
   }
 }
 
-void BFFree(void* value) {
+void FreeBloom(void* value) {
   if (value) {
-    auto* chain = static_cast<SBChain*>(value);
-    chain->Destroy();
+    static_cast<ScalingBloomFilter*>(value)->Free();
   }
 }
 
-size_t BFMemUsage(const void* value) {
+size_t BloomMemUsage(const void* value) {
   if (!value) return 0;
-  return static_cast<const SBChain*>(value)->MemUsage();
+  return static_cast<const ScalingBloomFilter*>(value)->BytesUsed();
 }

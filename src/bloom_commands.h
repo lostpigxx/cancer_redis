@@ -15,14 +15,3 @@ extern "C" {
 #endif
 
 int RegisterBloomCommands(RedisModuleCtx* ctx);
-
-int BFReserveCommand(RedisModuleCtx* ctx, RedisModuleString** argv, int argc);
-int BFAddCommand(RedisModuleCtx* ctx, RedisModuleString** argv, int argc);
-int BFMaddCommand(RedisModuleCtx* ctx, RedisModuleString** argv, int argc);
-int BFInsertCommand(RedisModuleCtx* ctx, RedisModuleString** argv, int argc);
-int BFExistsCommand(RedisModuleCtx* ctx, RedisModuleString** argv, int argc);
-int BFMexistsCommand(RedisModuleCtx* ctx, RedisModuleString** argv, int argc);
-int BFInfoCommand(RedisModuleCtx* ctx, RedisModuleString** argv, int argc);
-int BFCardCommand(RedisModuleCtx* ctx, RedisModuleString** argv, int argc);
-int BFScandumpCommand(RedisModuleCtx* ctx, RedisModuleString** argv, int argc);
-int BFLoadchunkCommand(RedisModuleCtx* ctx, RedisModuleString** argv, int argc);

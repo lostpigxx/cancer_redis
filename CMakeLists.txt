@@ -32,13 +32,7 @@ set_target_properties(redis_bloom PROPERTIES
 # GTest-based unit tests
 option(BUILD_TESTS "Build unit tests" OFF)
 if(BUILD_TESTS)
-  include(FetchContent)
-  FetchContent_Declare(
-    googletest
-    SOURCE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../valkey_hash/build/_deps/googletest-src
-  )
-  set(gtest_force_shared_crt ON CACHE BOOL "" FORCE)
-  FetchContent_MakeAvailable(googletest)
+  find_package(GTest REQUIRED)
   enable_testing()
 
   add_executable(bloom_filter_test

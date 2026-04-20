@@ -14,14 +14,16 @@ extern "C" {
 #undef _BF_RDB_API_DEFINED
 #endif
 
-extern RedisModuleType* BFType;
+extern RedisModuleType* BloomType;
 
-constexpr int kBFMinOptionsEnc = 2;
-constexpr int kBFMinGrowthEnc = 4;
-constexpr int kBFCurrentEncver = 4;
+// RDB encoding versions for backward compatibility.
+// The wire format is dictated by interoperability with existing Redis data.
+constexpr int kEncVerWithFlags = 2;
+constexpr int kEncVerWithExpansion = 4;
+constexpr int kCurrentEncVer = 4;
 
-void* BFRdbLoad(RedisModuleIO* rdb, int encver);
-void BFRdbSave(RedisModuleIO* rdb, void* value);
-void BFAofRewrite(RedisModuleIO* aof, RedisModuleString* key, void* value);
-void BFFree(void* value);
-size_t BFMemUsage(const void* value);
+void* RdbLoadBloom(RedisModuleIO* rdb, int encver);
+void RdbSaveBloom(RedisModuleIO* rdb, void* value);
+void AofRewriteBloom(RedisModuleIO* aof, RedisModuleString* key, void* value);
+void FreeBloom(void* value);
+size_t BloomMemUsage(const void* value);

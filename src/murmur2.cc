@@ -1,5 +1,5 @@
 // MurmurHash2 by Austin Appleby — public domain.
-// Exact port from RedisBloom deps/murmur2/MurmurHash2.c for hash compatibility.
+// Reference: https://github.com/aappleby/smhasher
 
 #include "murmur2.h"
 

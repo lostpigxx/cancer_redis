@@ -3,203 +3,184 @@
 
 #include <cstring>
 
-static int AddLink(SBChain* chain, uint64_t capacity, double error, unsigned options) {
-  auto* newFilters = static_cast<SBLink*>(
-    RMRealloc(chain->filters, (chain->nfilters + 1) * sizeof(SBLink)));
-  if (!newFilters) return -1;
+static int AppendLayer(ScalingBloomFilter* filter, uint64_t cap, double rate, unsigned flags) {
+  size_t newCount = filter->numLayers + 1;
+  auto* expanded = static_cast<FilterLayer*>(
+    RMRealloc(filter->layers, newCount * sizeof(FilterLayer)));
+  if (!expanded) return -1;
 
-  chain->filters = newFilters;
-  SBLink& link = chain->filters[chain->nfilters];
-  link.size = 0;
-  std::memset(&link.inner, 0, sizeof(BloomFilter));
+  filter->layers = expanded;
+  FilterLayer& layer = filter->layers[filter->numLayers];
+  layer.itemCount = 0;
+  std::memset(&layer.bloom, 0, sizeof(BloomLayer));
 
-  if (link.inner.Init(capacity, error, options) != 0) {
-    return -1;
-  }
-  chain->nfilters++;
+  if (layer.bloom.Setup(cap, rate, flags) != 0) return -1;
+  filter->numLayers = newCount;
   return 0;
 }
 
-SBChain* SBChain::Create(uint64_t capacity, double errorRate,
-                          unsigned options, unsigned growth) {
-  auto* chain = static_cast<SBChain*>(RMCalloc(1, sizeof(SBChain)));
-  if (!chain) return nullptr;
+ScalingBloomFilter* ScalingBloomFilter::New(uint64_t initialCapacity, double errorRate,
+                                             unsigned flg, unsigned expansion) {
+  auto* filter = static_cast<ScalingBloomFilter*>(RMCalloc(1, sizeof(ScalingBloomFilter)));
+  if (!filter) return nullptr;
 
-  chain->filters = nullptr;
-  chain->size = 0;
-  chain->nfilters = 0;
-  chain->options = options;
-  chain->growth = growth;
+  filter->layers = nullptr;
+  filter->totalItems = 0;
+  filter->numLayers = 0;
+  filter->flags = flg;
+  filter->expansionFactor = expansion;
 
-  double firstError = (options & kBloomOptNoScaling)
-    ? errorRate
-    : errorRate * kErrorTighteningRatio;
+  double initialRate = (flg & kFixedSize) ? errorRate : errorRate * kTighteningRatio;
 
-  if (AddLink(chain, capacity, firstError, options) != 0) {
-    RMFree(chain);
+  if (AppendLayer(filter, initialCapacity, initialRate, flg) != 0) {
+    RMFree(filter);
     return nullptr;
   }
-  return chain;
+  return filter;
 }
 
-void SBChain::Destroy() {
-  for (size_t i = 0; i < this->nfilters; i++) {
-    this->filters[i].inner.Destroy();
+void ScalingBloomFilter::Free() {
+  for (size_t i = 0; i < numLayers; i++) {
+    layers[i].bloom.Teardown();
   }
-  if (this->filters) {
-    RMFree(this->filters);
-  }
+  if (layers) RMFree(layers);
   RMFree(this);
 }
 
-int SBChain::Add(const void* buf, size_t len) {
-  BloomHashVal hv;
-  if (this->nfilters > 0 && this->filters[0].inner.force64) {
-    hv = CalcHash64(buf, static_cast<int>(len));
-  } else {
-    hv = CalcHash(buf, static_cast<int>(len));
+int ScalingBloomFilter::Put(const void* data, size_t length) {
+  bool use64 = (numLayers > 0 && layers[0].bloom.prefer64);
+  HashPair hp = use64
+    ? ComputeHash64(data, static_cast<int>(length))
+    : ComputeHash32(data, static_cast<int>(length));
+
+  for (size_t i = numLayers; i > 0; i--) {
+    if (layers[i - 1].bloom.Test(hp)) return 0;
   }
 
-  // Check all existing layers (newest first) for duplicates
-  for (size_t ii = this->nfilters; ii > 0; ii--) {
-    if (this->filters[ii - 1].inner.Check(hv)) {
-      return 0;
-    }
+  FilterLayer* top = &layers[numLayers - 1];
+
+  if (top->itemCount >= top->bloom.capacity) {
+    if (flags & kFixedSize) return -1;
+
+    uint64_t nextCap = top->bloom.capacity * expansionFactor;
+    double nextRate = top->bloom.fpRate * kTighteningRatio;
+    if (nextRate <= 0.0) return -1;
+
+    if (AppendLayer(this, nextCap, nextRate, flags) != 0) return -1;
+    top = &layers[numLayers - 1];
   }
 
-  SBLink* cur = &this->filters[this->nfilters - 1];
-
-  if (cur->size >= cur->inner.entries) {
-    if (this->options & kBloomOptNoScaling) {
-      return -1;
-    }
-    uint64_t newCapacity = cur->inner.entries * this->growth;
-    double newError = cur->inner.error * kErrorTighteningRatio;
-    if (newError <= 0) {
-      return -1;
-    }
-    if (AddLink(this, newCapacity, newError, this->options) != 0) {
-      return -1;
-    }
-    cur = &this->filters[this->nfilters - 1];
-  }
-
-  cur->inner.Add(hv);
-  cur->size++;
-  this->size++;
+  top->bloom.Insert(hp);
+  top->itemCount++;
+  totalItems++;
   return 1;
 }
 
-int SBChain::Check(const void* buf, size_t len) const {
-  BloomHashVal hv;
-  if (this->nfilters > 0 && this->filters[0].inner.force64) {
-    hv = CalcHash64(buf, static_cast<int>(len));
-  } else {
-    hv = CalcHash(buf, static_cast<int>(len));
-  }
+int ScalingBloomFilter::Contains(const void* data, size_t length) const {
+  bool use64 = (numLayers > 0 && layers[0].bloom.prefer64);
+  HashPair hp = use64
+    ? ComputeHash64(data, static_cast<int>(length))
+    : ComputeHash32(data, static_cast<int>(length));
 
-  for (size_t ii = this->nfilters; ii > 0; ii--) {
-    if (this->filters[ii - 1].inner.Check(hv)) {
-      return 1;
-    }
+  for (size_t i = numLayers; i > 0; i--) {
+    if (layers[i - 1].bloom.Test(hp)) return 1;
   }
   return 0;
 }
 
-uint64_t SBChain::Capacity() const {
-  uint64_t cap = 0;
-  for (size_t i = 0; i < this->nfilters; i++) {
-    cap += this->filters[i].inner.entries;
+uint64_t ScalingBloomFilter::TotalCapacity() const {
+  uint64_t sum = 0;
+  for (size_t i = 0; i < numLayers; i++) {
+    sum += layers[i].bloom.capacity;
   }
-  return cap;
+  return sum;
 }
 
-size_t SBChain::MemUsage() const {
-  size_t mem = sizeof(SBChain);
-  mem += this->nfilters * sizeof(SBLink);
-  for (size_t i = 0; i < this->nfilters; i++) {
-    mem += this->filters[i].inner.bytes;
+size_t ScalingBloomFilter::BytesUsed() const {
+  size_t total = sizeof(ScalingBloomFilter) + numLayers * sizeof(FilterLayer);
+  for (size_t i = 0; i < numLayers; i++) {
+    total += layers[i].bloom.dataSize;
   }
-  return mem;
+  return total;
 }
 
-// --- SCANDUMP / LOADCHUNK helpers ---
+// --- Wire format serialization for SCANDUMP/LOADCHUNK ---
 
-size_t SBChainDumpHeaderSize(const SBChain* chain) {
-  return sizeof(DumpedChainHeader) + chain->nfilters * sizeof(DumpedChainLink);
+size_t ComputeHeaderSize(const ScalingBloomFilter* filter) {
+  return sizeof(WireFilterHeader) + filter->numLayers * sizeof(WireLayerMeta);
 }
 
-size_t SBChainDumpHeader(const SBChain* chain, void* buf) {
-  auto* hdr = static_cast<DumpedChainHeader*>(buf);
-  hdr->size = chain->size;
-  hdr->nfilters = static_cast<uint32_t>(chain->nfilters);
-  hdr->options = chain->options;
-  hdr->growth = chain->growth;
+size_t SerializeHeader(const ScalingBloomFilter* filter, void* output) {
+  auto* hdr = static_cast<WireFilterHeader*>(output);
+  hdr->totalItems = filter->totalItems;
+  hdr->numLayers = static_cast<uint32_t>(filter->numLayers);
+  hdr->flags = filter->flags;
+  hdr->expansionFactor = filter->expansionFactor;
 
-  auto* links = reinterpret_cast<DumpedChainLink*>(
-    static_cast<char*>(buf) + sizeof(DumpedChainHeader));
+  auto* meta = reinterpret_cast<WireLayerMeta*>(
+    static_cast<char*>(output) + sizeof(WireFilterHeader));
 
-  for (size_t i = 0; i < chain->nfilters; i++) {
-    const SBLink& sl = chain->filters[i];
-    links[i].bytes = sl.inner.bytes;
-    links[i].bits = sl.inner.bits;
-    links[i].size = sl.size;
-    links[i].error = sl.inner.error;
-    links[i].bpe = sl.inner.bpe;
-    links[i].hashes = sl.inner.hashes;
-    links[i].entries = sl.inner.entries;
-    links[i].n2 = sl.inner.n2;
+  for (size_t i = 0; i < filter->numLayers; i++) {
+    const FilterLayer& layer = filter->layers[i];
+    meta[i].dataSize = layer.bloom.dataSize;
+    meta[i].totalBits = layer.bloom.totalBits;
+    meta[i].itemCount = layer.itemCount;
+    meta[i].fpRate = layer.bloom.fpRate;
+    meta[i].bitsPerEntry = layer.bloom.bitsPerEntry;
+    meta[i].hashCount = layer.bloom.hashCount;
+    meta[i].capacity = layer.bloom.capacity;
+    meta[i].log2Bits = layer.bloom.log2Bits;
   }
 
-  return sizeof(DumpedChainHeader) + chain->nfilters * sizeof(DumpedChainLink);
+  return sizeof(WireFilterHeader) + filter->numLayers * sizeof(WireLayerMeta);
 }
 
-SBChain* SBChainLoadHeader(const void* buf, size_t len) {
-  if (len < sizeof(DumpedChainHeader)) return nullptr;
+ScalingBloomFilter* DeserializeHeader(const void* data, size_t length) {
+  if (length < sizeof(WireFilterHeader)) return nullptr;
 
-  const auto* hdr = static_cast<const DumpedChainHeader*>(buf);
-  size_t expected = sizeof(DumpedChainHeader) + hdr->nfilters * sizeof(DumpedChainLink);
-  if (len < expected) return nullptr;
+  const auto* hdr = static_cast<const WireFilterHeader*>(data);
+  size_t required = sizeof(WireFilterHeader) + hdr->numLayers * sizeof(WireLayerMeta);
+  if (length < required) return nullptr;
 
-  auto* chain = static_cast<SBChain*>(RMCalloc(1, sizeof(SBChain)));
-  if (!chain) return nullptr;
+  auto* filter = static_cast<ScalingBloomFilter*>(RMCalloc(1, sizeof(ScalingBloomFilter)));
+  if (!filter) return nullptr;
 
-  chain->size = hdr->size;
-  chain->nfilters = hdr->nfilters;
-  chain->options = hdr->options;
-  chain->growth = hdr->growth;
+  filter->totalItems = hdr->totalItems;
+  filter->numLayers = hdr->numLayers;
+  filter->flags = hdr->flags;
+  filter->expansionFactor = hdr->expansionFactor;
 
-  chain->filters = static_cast<SBLink*>(RMCalloc(chain->nfilters, sizeof(SBLink)));
-  if (!chain->filters) {
-    RMFree(chain);
+  filter->layers = static_cast<FilterLayer*>(RMCalloc(filter->numLayers, sizeof(FilterLayer)));
+  if (!filter->layers) {
+    RMFree(filter);
     return nullptr;
   }
 
-  const auto* links = reinterpret_cast<const DumpedChainLink*>(
-    static_cast<const char*>(buf) + sizeof(DumpedChainHeader));
+  const auto* meta = reinterpret_cast<const WireLayerMeta*>(
+    static_cast<const char*>(data) + sizeof(WireFilterHeader));
 
-  for (size_t i = 0; i < chain->nfilters; i++) {
-    SBLink& sl = chain->filters[i];
-    sl.size = links[i].size;
-    sl.inner.bytes = links[i].bytes;
-    sl.inner.bits = links[i].bits;
-    sl.inner.error = links[i].error;
-    sl.inner.bpe = links[i].bpe;
-    sl.inner.hashes = links[i].hashes;
-    sl.inner.entries = links[i].entries;
-    sl.inner.n2 = links[i].n2;
-    sl.inner.force64 = (chain->options & kBloomOptForce64) ? 1 : 0;
+  for (size_t i = 0; i < filter->numLayers; i++) {
+    FilterLayer& layer = filter->layers[i];
+    layer.itemCount = meta[i].itemCount;
+    layer.bloom.dataSize = meta[i].dataSize;
+    layer.bloom.totalBits = meta[i].totalBits;
+    layer.bloom.fpRate = meta[i].fpRate;
+    layer.bloom.bitsPerEntry = meta[i].bitsPerEntry;
+    layer.bloom.hashCount = meta[i].hashCount;
+    layer.bloom.capacity = meta[i].capacity;
+    layer.bloom.log2Bits = meta[i].log2Bits;
+    layer.bloom.prefer64 = (filter->flags & kUse64Bit) ? 1 : 0;
 
-    sl.inner.bf = static_cast<uint8_t*>(RMCalloc(sl.inner.bytes, 1));
-    if (!sl.inner.bf) {
+    layer.bloom.bitArray = static_cast<uint8_t*>(RMCalloc(layer.bloom.dataSize, 1));
+    if (!layer.bloom.bitArray) {
       for (size_t j = 0; j < i; j++) {
-        chain->filters[j].inner.Destroy();
+        filter->layers[j].bloom.Teardown();
       }
-      RMFree(chain->filters);
-      RMFree(chain);
+      RMFree(filter->layers);
+      RMFree(filter);
       return nullptr;
     }
   }
 
-  return chain;
+  return filter;
 }

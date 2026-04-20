@@ -4,34 +4,31 @@
 #include <string>
 #include <vector>
 
-TEST(SBChainTest, CreateAndDestroy) {
-  auto* chain = SBChain::Create(1000, 0.01,
-                                 kBloomOptForce64 | kBloomOptNoRound, 2);
-  ASSERT_NE(chain, nullptr);
-  EXPECT_EQ(chain->nfilters, 1u);
-  EXPECT_EQ(chain->size, 0u);
-  EXPECT_EQ(chain->growth, 2u);
-  EXPECT_GT(chain->Capacity(), 0u);
-  chain->Destroy();
+TEST(ScalingBloomTest, NewAndFree) {
+  auto* filter = ScalingBloomFilter::New(1000, 0.01, kUse64Bit | kNoRound, 2);
+  ASSERT_NE(filter, nullptr);
+  EXPECT_EQ(filter->numLayers, 1u);
+  EXPECT_EQ(filter->totalItems, 0u);
+  EXPECT_EQ(filter->expansionFactor, 2u);
+  EXPECT_GT(filter->TotalCapacity(), 0u);
+  filter->Free();
 }
 
-TEST(SBChainTest, AddAndCheck) {
-  auto* chain = SBChain::Create(1000, 0.01,
-                                 kBloomOptForce64 | kBloomOptNoRound, 2);
-  ASSERT_NE(chain, nullptr);
+TEST(ScalingBloomTest, PutAndContains) {
+  auto* filter = ScalingBloomFilter::New(1000, 0.01, kUse64Bit | kNoRound, 2);
+  ASSERT_NE(filter, nullptr);
 
-  EXPECT_EQ(chain->Add("hello", 5), 1);   // New item
-  EXPECT_EQ(chain->Add("hello", 5), 0);   // Duplicate
-  EXPECT_EQ(chain->Check("hello", 5), 1);
-  EXPECT_EQ(chain->size, 1u);
+  EXPECT_EQ(filter->Put("hello", 5), 1);
+  EXPECT_EQ(filter->Put("hello", 5), 0);
+  EXPECT_EQ(filter->Contains("hello", 5), 1);
+  EXPECT_EQ(filter->totalItems, 1u);
 
-  chain->Destroy();
+  filter->Free();
 }
 
-TEST(SBChainTest, NoFalseNegatives) {
-  auto* chain = SBChain::Create(5000, 0.01,
-                                 kBloomOptForce64 | kBloomOptNoRound, 2);
-  ASSERT_NE(chain, nullptr);
+TEST(ScalingBloomTest, NoFalseNegatives) {
+  auto* filter = ScalingBloomFilter::New(5000, 0.01, kUse64Bit | kNoRound, 2);
+  ASSERT_NE(filter, nullptr);
 
   std::vector<std::string> items;
   for (int i = 0; i < 5000; i++) {
@@ -39,104 +36,97 @@ TEST(SBChainTest, NoFalseNegatives) {
   }
 
   for (const auto& item : items) {
-    chain->Add(item.c_str(), item.size());
+    filter->Put(item.c_str(), item.size());
   }
 
   for (const auto& item : items) {
-    EXPECT_EQ(chain->Check(item.c_str(), item.size()), 1)
+    EXPECT_EQ(filter->Contains(item.c_str(), item.size()), 1)
       << "False negative for " << item;
   }
 
-  chain->Destroy();
+  filter->Free();
 }
 
-TEST(SBChainTest, Scaling) {
-  // Small initial capacity to force scaling
-  auto* chain = SBChain::Create(100, 0.01,
-                                 kBloomOptForce64 | kBloomOptNoRound, 2);
-  ASSERT_NE(chain, nullptr);
+TEST(ScalingBloomTest, AutoExpansion) {
+  auto* filter = ScalingBloomFilter::New(100, 0.01, kUse64Bit | kNoRound, 2);
+  ASSERT_NE(filter, nullptr);
 
   for (int i = 0; i < 500; i++) {
-    std::string item = "scale_" + std::to_string(i);
-    chain->Add(item.c_str(), item.size());
+    std::string item = "expand_" + std::to_string(i);
+    filter->Put(item.c_str(), item.size());
   }
 
-  EXPECT_GT(chain->nfilters, 1u) << "Should have scaled to multiple filters";
+  EXPECT_GT(filter->numLayers, 1u);
 
-  // Verify all items still exist
   for (int i = 0; i < 500; i++) {
-    std::string item = "scale_" + std::to_string(i);
-    EXPECT_EQ(chain->Check(item.c_str(), item.size()), 1)
-      << "False negative after scaling for " << item;
+    std::string item = "expand_" + std::to_string(i);
+    EXPECT_EQ(filter->Contains(item.c_str(), item.size()), 1)
+      << "False negative after expansion for " << item;
   }
 
-  chain->Destroy();
+  filter->Free();
 }
 
-TEST(SBChainTest, NonScaling) {
-  auto* chain = SBChain::Create(100, 0.01,
-                                 kBloomOptForce64 | kBloomOptNoRound | kBloomOptNoScaling, 2);
-  ASSERT_NE(chain, nullptr);
+TEST(ScalingBloomTest, FixedSizeRejectsOverflow) {
+  auto* filter = ScalingBloomFilter::New(100, 0.01,
+                                          kUse64Bit | kNoRound | kFixedSize, 2);
+  ASSERT_NE(filter, nullptr);
 
-  // Fill up the filter
-  int added = 0;
+  int inserted = 0;
   for (int i = 0; i < 200; i++) {
-    std::string item = "ns_" + std::to_string(i);
-    int rv = chain->Add(item.c_str(), item.size());
+    std::string item = "fixed_" + std::to_string(i);
+    int rv = filter->Put(item.c_str(), item.size());
     if (rv == -1) break;
-    if (rv == 1) added++;
+    if (rv == 1) inserted++;
   }
 
-  EXPECT_EQ(chain->nfilters, 1u);
-  EXPECT_LE(added, 100);
+  EXPECT_EQ(filter->numLayers, 1u);
+  EXPECT_LE(inserted, 100);
 
-  chain->Destroy();
+  filter->Free();
 }
 
-TEST(SBChainTest, Capacity) {
-  auto* chain = SBChain::Create(1000, 0.01,
-                                 kBloomOptForce64 | kBloomOptNoRound, 2);
-  ASSERT_NE(chain, nullptr);
-  EXPECT_EQ(chain->Capacity(), 1000u);
-  chain->Destroy();
+TEST(ScalingBloomTest, TotalCapacity) {
+  auto* filter = ScalingBloomFilter::New(1000, 0.01, kUse64Bit | kNoRound, 2);
+  ASSERT_NE(filter, nullptr);
+  EXPECT_EQ(filter->TotalCapacity(), 1000u);
+  filter->Free();
 }
 
-TEST(SBChainTest, MemUsage) {
-  auto* chain = SBChain::Create(1000, 0.01,
-                                 kBloomOptForce64 | kBloomOptNoRound, 2);
-  ASSERT_NE(chain, nullptr);
-  EXPECT_GT(chain->MemUsage(), sizeof(SBChain));
-  chain->Destroy();
+TEST(ScalingBloomTest, BytesUsed) {
+  auto* filter = ScalingBloomFilter::New(1000, 0.01, kUse64Bit | kNoRound, 2);
+  ASSERT_NE(filter, nullptr);
+  EXPECT_GT(filter->BytesUsed(), sizeof(ScalingBloomFilter));
+  filter->Free();
 }
 
-TEST(SBChainTest, DumpAndLoadHeader) {
-  auto* chain = SBChain::Create(1000, 0.01,
-                                 kBloomOptForce64 | kBloomOptNoRound, 2);
-  ASSERT_NE(chain, nullptr);
+TEST(ScalingBloomTest, SerializeDeserializeHeader) {
+  auto* filter = ScalingBloomFilter::New(1000, 0.01, kUse64Bit | kNoRound, 2);
+  ASSERT_NE(filter, nullptr);
 
   for (int i = 0; i < 100; i++) {
-    std::string item = "dump_" + std::to_string(i);
-    chain->Add(item.c_str(), item.size());
+    std::string item = "ser_" + std::to_string(i);
+    filter->Put(item.c_str(), item.size());
   }
 
-  size_t hdrSize = SBChainDumpHeaderSize(chain);
+  size_t hdrSize = ComputeHeaderSize(filter);
   std::vector<char> buf(hdrSize);
-  SBChainDumpHeader(chain, buf.data());
+  SerializeHeader(filter, buf.data());
 
-  auto* loaded = SBChainLoadHeader(buf.data(), buf.size());
-  ASSERT_NE(loaded, nullptr);
+  auto* restored = DeserializeHeader(buf.data(), buf.size());
+  ASSERT_NE(restored, nullptr);
 
-  EXPECT_EQ(loaded->size, chain->size);
-  EXPECT_EQ(loaded->nfilters, chain->nfilters);
-  EXPECT_EQ(loaded->options, chain->options);
-  EXPECT_EQ(loaded->growth, chain->growth);
+  EXPECT_EQ(restored->totalItems, filter->totalItems);
+  EXPECT_EQ(restored->numLayers, filter->numLayers);
+  EXPECT_EQ(restored->flags, filter->flags);
+  EXPECT_EQ(restored->expansionFactor, filter->expansionFactor);
 
-  for (size_t i = 0; i < loaded->nfilters; i++) {
-    EXPECT_EQ(loaded->filters[i].inner.entries, chain->filters[i].inner.entries);
-    EXPECT_EQ(loaded->filters[i].inner.hashes, chain->filters[i].inner.hashes);
-    EXPECT_EQ(loaded->filters[i].inner.bits, chain->filters[i].inner.bits);
+  for (size_t i = 0; i < restored->numLayers; i++) {
+    EXPECT_EQ(restored->layers[i].bloom.capacity, filter->layers[i].bloom.capacity);
+    EXPECT_EQ(restored->layers[i].bloom.hashCount, filter->layers[i].bloom.hashCount);
+    EXPECT_EQ(restored->layers[i].bloom.totalBits, filter->layers[i].bloom.totalBits);
   }
 
-  loaded->Destroy();
-  chain->Destroy();
+  restored->Free();
+  filter->Free();
 }

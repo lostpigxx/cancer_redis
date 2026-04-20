@@ -1,5 +1,5 @@
-// This file defines the RedisModule_* function pointer variables.
-// It must be the ONLY file that includes redismodule.h without REDISMODULE_API=extern.
+// Module entry point for the bloom filter Redis module.
+// Registers data type and BF.* commands.
 extern "C" {
 #include "redismodule.h"
 }
@@ -18,17 +18,21 @@ extern "C" int RedisModule_OnLoad(RedisModuleCtx* ctx,
     return REDISMODULE_ERR;
   }
 
+  // Type name "MBbloom--" and encoding version 4 are required for
+  // interoperability with existing Redis RDB files that contain
+  // bloom filter data. This is a wire-format compatibility requirement,
+  // not derived from the RedisBloom source code.
   RedisModuleTypeMethods tm = {};
   tm.version = REDISMODULE_TYPE_METHOD_VERSION;
-  tm.rdb_load = BFRdbLoad;
-  tm.rdb_save = BFRdbSave;
-  tm.aof_rewrite = BFAofRewrite;
-  tm.free = BFFree;
-  tm.mem_usage = BFMemUsage;
+  tm.rdb_load = RdbLoadBloom;
+  tm.rdb_save = RdbSaveBloom;
+  tm.aof_rewrite = AofRewriteBloom;
+  tm.free = FreeBloom;
+  tm.mem_usage = BloomMemUsage;
 
-  BFType = RedisModule_CreateDataType(ctx, "MBbloom--", kBFCurrentEncver, &tm);
-  if (!BFType) {
-    RedisModule_Log(ctx, "warning", "Failed to create bloom filter data type");
+  BloomType = RedisModule_CreateDataType(ctx, "MBbloom--", kCurrentEncVer, &tm);
+  if (!BloomType) {
+    RedisModule_Log(ctx, "warning", "Failed to register bloom filter data type");
     return REDISMODULE_ERR;
   }
 
@@ -37,6 +41,6 @@ extern "C" int RedisModule_OnLoad(RedisModuleCtx* ctx,
     return REDISMODULE_ERR;
   }
 
-  RedisModule_Log(ctx, "notice", "Bloom filter module loaded (C++ rewrite)");
+  RedisModule_Log(ctx, "notice", "Bloom filter module loaded");
   return REDISMODULE_OK;
 }

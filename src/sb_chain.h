@@ -3,58 +3,67 @@
 #include "bloom_filter.h"
 #include <cstddef>
 
-constexpr unsigned kBloomOptNoRound = 1;
-constexpr unsigned kBloomOptEntsIsBits = 2;
-constexpr unsigned kBloomOptForce64 = 4;
-constexpr unsigned kBloomOptNoScaling = 8;
-
-constexpr double kErrorTighteningRatio = 0.5;
-
-struct SBLink {
-  BloomFilter inner;
-  size_t size = 0;
+// Flags controlling bloom filter behavior.
+// Values are fixed for RDB serialization compatibility.
+enum BloomFlags : unsigned {
+  kNoRound    = 1,
+  kRawBits    = 2,
+  kUse64Bit   = 4,
+  kFixedSize  = 8,
 };
 
-struct SBChain {
-  SBLink* filters = nullptr;
-  size_t size = 0;
-  size_t nfilters = 0;
-  unsigned options = 0;
-  unsigned growth = 2;
+constexpr double kTighteningRatio = 0.5;
 
-  static SBChain* Create(uint64_t capacity, double errorRate,
-                          unsigned options, unsigned growth);
-  void Destroy();
-
-  // Returns: 1 = newly added, 0 = already existed, -1 = error
-  int Add(const void* buf, size_t len);
-  int Check(const void* buf, size_t len) const;
-
-  uint64_t Capacity() const;
-  size_t MemUsage() const;
+// One layer in a scaling bloom filter.
+struct FilterLayer {
+  BloomLayer bloom;
+  size_t itemCount = 0;
 };
 
+// Scaling bloom filter: a chain of FilterLayer instances that grows
+// automatically when capacity is exceeded.
+// Based on "Scalable Bloom Filters" by Almeida, Baquero et al. (2007).
+struct ScalingBloomFilter {
+  FilterLayer* layers = nullptr;
+  size_t totalItems = 0;
+  size_t numLayers = 0;
+  unsigned flags = 0;
+  unsigned expansionFactor = 2;
+
+  static ScalingBloomFilter* New(uint64_t initialCapacity, double errorRate,
+                                  unsigned flags, unsigned expansion);
+  void Free();
+
+  // Returns: 1 = inserted, 0 = duplicate, -1 = full (fixed-size mode)
+  int Put(const void* data, size_t length);
+  int Contains(const void* data, size_t length) const;
+
+  uint64_t TotalCapacity() const;
+  size_t BytesUsed() const;
+};
+
+// Wire-format structures for SCANDUMP/LOADCHUNK interoperability.
+// Layout must match Redis's expected format for cross-module compatibility.
 #pragma pack(push, 1)
-struct DumpedChainLink {
-  uint64_t bytes;
-  uint64_t bits;
-  uint64_t size;
-  double error;
-  double bpe;
-  uint32_t hashes;
-  uint64_t entries;
-  uint8_t n2;
+struct WireLayerMeta {
+  uint64_t dataSize;
+  uint64_t totalBits;
+  uint64_t itemCount;
+  double fpRate;
+  double bitsPerEntry;
+  uint32_t hashCount;
+  uint64_t capacity;
+  uint8_t log2Bits;
 };
 
-struct DumpedChainHeader {
-  uint64_t size;
-  uint32_t nfilters;
-  uint32_t options;
-  uint32_t growth;
+struct WireFilterHeader {
+  uint64_t totalItems;
+  uint32_t numLayers;
+  uint32_t flags;
+  uint32_t expansionFactor;
 };
 #pragma pack(pop)
 
-// SCANDUMP/LOADCHUNK helpers
-size_t SBChainDumpHeaderSize(const SBChain* chain);
-size_t SBChainDumpHeader(const SBChain* chain, void* buf);
-SBChain* SBChainLoadHeader(const void* buf, size_t len);
+size_t ComputeHeaderSize(const ScalingBloomFilter* filter);
+size_t SerializeHeader(const ScalingBloomFilter* filter, void* output);
+ScalingBloomFilter* DeserializeHeader(const void* data, size_t length);

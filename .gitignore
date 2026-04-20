@@ -5,3 +5,4 @@ minikv/build
 minikv/build*/
 __pycache__/
 *.pyc
+dump.rdb

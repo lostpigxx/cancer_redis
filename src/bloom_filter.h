@@ -1,29 +1,32 @@
 #pragma once
 
 #include <cstdint>
+#include <cstddef>
 
-struct BloomHashVal {
-  uint64_t a;
-  uint64_t b;
+struct HashPair {
+  uint64_t primary;
+  uint64_t secondary;
 };
 
-BloomHashVal CalcHash(const void* buf, int len);
-BloomHashVal CalcHash64(const void* buf, int len);
+HashPair ComputeHash32(const void* data, int length);
+HashPair ComputeHash64(const void* data, int length);
 
-struct BloomFilter {
-  uint32_t hashes = 0;
-  uint8_t force64 = 0;
-  uint8_t n2 = 0;
-  uint64_t entries = 0;
-  double error = 0.0;
-  double bpe = 0.0;
-  uint8_t* bf = nullptr;
-  uint64_t bytes = 0;
-  uint64_t bits = 0;
+// A single bloom filter layer (bit array + hash parameters).
+// Implements the standard bloom filter algorithm from Burton Bloom (1970).
+struct BloomLayer {
+  uint32_t hashCount = 0;
+  uint8_t prefer64 = 0;
+  uint8_t log2Bits = 0;
+  uint64_t capacity = 0;
+  double fpRate = 0.0;
+  double bitsPerEntry = 0.0;
+  uint8_t* bitArray = nullptr;
+  uint64_t dataSize = 0;
+  uint64_t totalBits = 0;
 
-  int Init(uint64_t entries, double error, unsigned options);
-  void Destroy();
+  int Setup(uint64_t cap, double falsePositiveRate, unsigned flags);
+  void Teardown();
 
-  bool Check(const BloomHashVal& hv) const;
-  bool Add(const BloomHashVal& hv);
+  bool Test(const HashPair& hp) const;
+  bool Insert(const HashPair& hp);
 };

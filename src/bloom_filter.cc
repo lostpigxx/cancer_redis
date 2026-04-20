@@ -5,130 +5,104 @@
 #include <cmath>
 #include <cstring>
 
-static constexpr unsigned kOptNoRound = 1;
-static constexpr unsigned kOptEntsIsBits = 2;
-static constexpr unsigned kOptForce64 = 4;
+static constexpr unsigned kFlagNoRound = 1;
+static constexpr unsigned kFlagRawBits = 2;
+static constexpr unsigned kFlag64Bit = 4;
 
-BloomHashVal CalcHash(const void* buf, int len) {
-  BloomHashVal hv;
-  hv.a = MurmurHash2(buf, len, 0x9747b28c);
-  hv.b = MurmurHash2(buf, len, static_cast<uint32_t>(hv.a));
-  return hv;
+HashPair ComputeHash32(const void* data, int length) {
+  HashPair hp;
+  hp.primary = MurmurHash2(data, length, 0x9747b28c);
+  hp.secondary = MurmurHash2(data, length, static_cast<uint32_t>(hp.primary));
+  return hp;
 }
 
-BloomHashVal CalcHash64(const void* buf, int len) {
-  BloomHashVal hv;
-  hv.a = MurmurHash64A(buf, len, 0xc6a4a7935bd1e995ULL);
-  hv.b = MurmurHash64A(buf, len, hv.a);
-  return hv;
+HashPair ComputeHash64(const void* data, int length) {
+  HashPair hp;
+  hp.primary = MurmurHash64A(data, length, 0xc6a4a7935bd1e995ULL);
+  hp.secondary = MurmurHash64A(data, length, hp.primary);
+  return hp;
 }
 
-int BloomFilter::Init(uint64_t ents, double err, unsigned options) {
-  this->entries = ents;
-  this->error = err;
-
-  if (options & kOptEntsIsBits) {
-    this->bpe = 0;
-  } else {
-    this->bpe = -(std::log(err) / (std::log(2.0) * std::log(2.0)));
-  }
-
-  if (options & kOptEntsIsBits) {
-    this->bits = ents;
-  } else {
-    double bn = static_cast<double>(ents) * this->bpe;
-    if (bn < 1024.0) bn = 1024.0;
-    this->bits = static_cast<uint64_t>(bn);
-  }
-
-  if (!(options & kOptNoRound)) {
-    // Round up bits to next power of 2
-    this->n2 = 0;
-    uint64_t tmp = this->bits;
-    while (tmp > 1) {
-      tmp >>= 1;
-      this->n2++;
-    }
-    if (this->bits != (1ULL << this->n2)) {
-      this->n2++;
-    }
-    this->bits = 1ULL << this->n2;
-  }
-
-  this->bytes = this->bits / 8;
-  if (this->bytes == 0) {
-    return -1;
-  }
-
-  if (options & kOptEntsIsBits) {
-    this->hashes = 0;
-  } else {
-    this->hashes = static_cast<uint32_t>(std::ceil(0.693147180559945 * this->bpe));
-    if (this->hashes == 0) this->hashes = 1;
-  }
-
-  this->force64 = (options & kOptForce64) ? 1 : 0;
-
-  this->bf = static_cast<uint8_t*>(RMCalloc(this->bytes, 1));
-  if (!this->bf) return -1;
-
-  return 0;
+static double CalcBitsPerEntry(double falsePositiveRate) {
+  double ln2 = std::log(2.0);
+  return -(std::log(falsePositiveRate) / (ln2 * ln2));
 }
 
-void BloomFilter::Destroy() {
-  if (this->bf) {
-    RMFree(this->bf);
-    this->bf = nullptr;
+static uint32_t CalcOptimalHashCount(double bitsPerEntry) {
+  uint32_t k = static_cast<uint32_t>(std::ceil(std::log(2.0) * bitsPerEntry));
+  return k > 0 ? k : 1;
+}
+
+static uint8_t CeilLog2(uint64_t value) {
+  uint8_t power = 0;
+  uint64_t v = 1;
+  while (v < value) {
+    v <<= 1;
+    power++;
+  }
+  return power;
+}
+
+int BloomLayer::Setup(uint64_t cap, double falsePositiveRate, unsigned flags) {
+  capacity = cap;
+  fpRate = falsePositiveRate;
+  prefer64 = (flags & kFlag64Bit) ? 1 : 0;
+
+  if (flags & kFlagRawBits) {
+    bitsPerEntry = 0;
+    totalBits = cap;
+    hashCount = 0;
+  } else {
+    bitsPerEntry = CalcBitsPerEntry(falsePositiveRate);
+    double rawBits = static_cast<double>(cap) * bitsPerEntry;
+    totalBits = static_cast<uint64_t>(rawBits < 1024.0 ? 1024.0 : rawBits);
+    hashCount = CalcOptimalHashCount(bitsPerEntry);
+  }
+
+  if (!(flags & kFlagNoRound)) {
+    log2Bits = CeilLog2(totalBits);
+    totalBits = 1ULL << log2Bits;
+  }
+
+  dataSize = totalBits / 8;
+  if (dataSize == 0) return -1;
+
+  bitArray = static_cast<uint8_t*>(RMCalloc(dataSize, 1));
+  return bitArray ? 0 : -1;
+}
+
+void BloomLayer::Teardown() {
+  if (bitArray) {
+    RMFree(bitArray);
+    bitArray = nullptr;
   }
 }
 
-bool BloomFilter::Check(const BloomHashVal& hv) const {
-  if (this->n2 > 0) {
-    uint64_t mod = (1ULL << this->n2) - 1;
-    for (uint32_t i = 0; i < this->hashes; i++) {
-      uint64_t x = (hv.a + i * hv.b) & mod;
-      uint64_t byte_idx = x >> 3;
-      uint8_t bit_mask = 1 << (x & 7);
-      if (!(this->bf[byte_idx] & bit_mask)) {
-        return false;
-      }
-    }
-  } else {
-    for (uint32_t i = 0; i < this->hashes; i++) {
-      uint64_t x = (hv.a + i * hv.b) % this->bits;
-      uint64_t byte_idx = x >> 3;
-      uint8_t bit_mask = 1 << (x & 7);
-      if (!(this->bf[byte_idx] & bit_mask)) {
-        return false;
-      }
+// Kirsch-Mitzenmacher optimization: derive k hash positions from two base hashes.
+// h_i(x) = primary + i * secondary (mod totalBits)
+bool BloomLayer::Test(const HashPair& hp) const {
+  uint64_t mask = (log2Bits > 0) ? ((1ULL << log2Bits) - 1) : 0;
+  for (uint32_t i = 0; i < hashCount; i++) {
+    uint64_t pos = hp.primary + i * hp.secondary;
+    pos = (log2Bits > 0) ? (pos & mask) : (pos % totalBits);
+    if (!(bitArray[pos >> 3] & (1 << (pos & 7)))) {
+      return false;
     }
   }
   return true;
 }
 
-bool BloomFilter::Add(const BloomHashVal& hv) {
-  bool existing = true;
-  if (this->n2 > 0) {
-    uint64_t mod = (1ULL << this->n2) - 1;
-    for (uint32_t i = 0; i < this->hashes; i++) {
-      uint64_t x = (hv.a + i * hv.b) & mod;
-      uint64_t byte_idx = x >> 3;
-      uint8_t bit_mask = 1 << (x & 7);
-      if (!(this->bf[byte_idx] & bit_mask)) {
-        existing = false;
-        this->bf[byte_idx] |= bit_mask;
-      }
-    }
-  } else {
-    for (uint32_t i = 0; i < this->hashes; i++) {
-      uint64_t x = (hv.a + i * hv.b) % this->bits;
-      uint64_t byte_idx = x >> 3;
-      uint8_t bit_mask = 1 << (x & 7);
-      if (!(this->bf[byte_idx] & bit_mask)) {
-        existing = false;
-        this->bf[byte_idx] |= bit_mask;
-      }
+bool BloomLayer::Insert(const HashPair& hp) {
+  bool allBitsSet = true;
+  uint64_t mask = (log2Bits > 0) ? ((1ULL << log2Bits) - 1) : 0;
+  for (uint32_t i = 0; i < hashCount; i++) {
+    uint64_t pos = hp.primary + i * hp.secondary;
+    pos = (log2Bits > 0) ? (pos & mask) : (pos % totalBits);
+    uint8_t bit = 1 << (pos & 7);
+    if (!(bitArray[pos >> 3] & bit)) {
+      allBitsSet = false;
+      bitArray[pos >> 3] |= bit;
     }
   }
-  return !existing;
+  return !allBitsSet;
 }
