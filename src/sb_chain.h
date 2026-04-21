@@ -1,16 +1,12 @@
 #pragma once
 
 #include "bloom_filter.h"
-#include <cstddef>
 
-// Flags controlling bloom filter behavior.
-// Values are fixed for RDB serialization compatibility.
-enum BloomFlags : unsigned {
-  kNoRound    = 1,
-  kRawBits    = 2,
-  kUse64Bit   = 4,
-  kFixedSize  = 8,
-};
+#include <algorithm>
+#include <cstddef>
+#include <numeric>
+#include <optional>
+#include <span>
 
 constexpr double kTighteningRatio = 0.5;
 
@@ -20,30 +16,60 @@ struct FilterLayer {
   size_t itemCount = 0;
 };
 
-// Scaling bloom filter: a chain of FilterLayer instances that grows
-// automatically when capacity is exceeded.
+// Scaling bloom filter with RAII lifetime management.
+// Layers grow automatically when capacity is exceeded.
 // Based on "Scalable Bloom Filters" by Almeida, Baquero et al. (2007).
-struct ScalingBloomFilter {
-  FilterLayer* layers = nullptr;
-  size_t totalItems = 0;
-  size_t numLayers = 0;
-  unsigned flags = 0;
-  unsigned expansionFactor = 2;
+class ScalingBloomFilter {
+public:
+  ScalingBloomFilter(uint64_t initialCapacity, double errorRate,
+                      BloomFlags flags, unsigned expansion);
+  ~ScalingBloomFilter();
 
-  static ScalingBloomFilter* New(uint64_t initialCapacity, double errorRate,
-                                  unsigned flags, unsigned expansion);
-  void Free();
+  ScalingBloomFilter(const ScalingBloomFilter&) = delete;
+  ScalingBloomFilter& operator=(const ScalingBloomFilter&) = delete;
+  ScalingBloomFilter(ScalingBloomFilter&&) noexcept;
+  ScalingBloomFilter& operator=(ScalingBloomFilter&&) noexcept;
 
-  // Returns: 1 = inserted, 0 = duplicate, -1 = full (fixed-size mode)
-  int Put(const void* data, size_t length);
-  int Contains(const void* data, size_t length) const;
+  bool IsValid() const { return layers_ != nullptr; }
+
+  // Returns: true = inserted, false = duplicate, nullopt = full (fixed-size mode)
+  std::optional<bool> Put(std::span<const std::byte> data);
+  bool Contains(std::span<const std::byte> data) const;
 
   uint64_t TotalCapacity() const;
   size_t BytesUsed() const;
+
+  // Layer access for RDB / SCANDUMP
+  std::span<FilterLayer> Layers() { return {layers_, numLayers_}; }
+  std::span<const FilterLayer> Layers() const { return {layers_, numLayers_}; }
+  size_t NumLayers() const { return numLayers_; }
+  size_t TotalItems() const { return totalItems_; }
+  BloomFlags Flags() const { return flags_; }
+  unsigned ExpansionFactor() const { return expansionFactor_; }
+
+  // For RDB deserialization: construct empty shell, then populate layers externally
+  struct RdbShell {
+    size_t totalItems;
+    size_t numLayers;
+    BloomFlags flags;
+    unsigned expansionFactor;
+  };
+  static ScalingBloomFilter* FromRdbShell(RdbShell shell);
+  void SetLayer(size_t index, FilterLayer&& layer);
+
+private:
+  HashPair ComputeHash(std::span<const std::byte> data) const;
+  bool AppendLayer(uint64_t cap, double rate);
+
+  FilterLayer* layers_ = nullptr;
+  size_t totalItems_ = 0;
+  size_t numLayers_ = 0;
+  size_t layerCapacity_ = 0;
+  BloomFlags flags_ = BloomFlags::None;
+  unsigned expansionFactor_ = 2;
 };
 
 // Wire-format structures for SCANDUMP/LOADCHUNK interoperability.
-// Layout must match Redis's expected format for cross-module compatibility.
 #pragma pack(push, 1)
 struct WireLayerMeta {
   uint64_t dataSize;
@@ -64,6 +90,6 @@ struct WireFilterHeader {
 };
 #pragma pack(pop)
 
-size_t ComputeHeaderSize(const ScalingBloomFilter* filter);
-size_t SerializeHeader(const ScalingBloomFilter* filter, void* output);
+size_t ComputeHeaderSize(const ScalingBloomFilter& filter);
+size_t SerializeHeader(const ScalingBloomFilter& filter, void* output);
 ScalingBloomFilter* DeserializeHeader(const void* data, size_t length);
