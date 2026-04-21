@@ -98,20 +98,6 @@ std::optional<BloomLayer> BloomLayer::Create(uint64_t cap, double falsePositiveR
   return layer;
 }
 
-BloomLayer BloomLayer::FromRdb(RdbParams p) {
-  BloomLayer layer;
-  layer.hashCount_ = p.hashCount;
-  layer.log2Bits_ = p.log2Bits;
-  layer.use64Bit_ = p.use64Bit;
-  layer.capacity_ = p.capacity;
-  layer.fpRate_ = p.fpRate;
-  layer.bitsPerEntry_ = p.bitsPerEntry;
-  layer.totalBits_ = p.totalBits;
-  layer.dataSize_ = p.dataSize;
-  layer.bitArray_ = p.bitArray;
-  return layer;
-}
-
 bool BloomLayer::Test(const HashPair& hp) const {
   if (log2Bits_ > 0) {
     uint64_t mask = (1ULL << log2Bits_) - 1;

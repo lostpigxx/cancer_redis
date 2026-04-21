@@ -1,4 +1,5 @@
 #include "sb_chain.h"
+#include "bloom_rdb.h"
 #include "rm_alloc.h"
 
 #include <algorithm>
@@ -80,7 +81,6 @@ HashPair ScalingBloomFilter::ComputeHash(std::span<const std::byte> data) const 
 std::optional<bool> ScalingBloomFilter::Put(std::span<const std::byte> data) {
   auto hp = ComputeHash(data);
 
-  // Check all existing layers (newest first) for duplicates
   auto layerSpan = Layers();
   for (auto& layer : std::views::reverse(layerSpan)) {
     if (layer.bloom.Test(hp)) return false;
@@ -126,14 +126,13 @@ size_t ScalingBloomFilter::BytesUsed() const {
     [](const FilterLayer& l) { return static_cast<size_t>(l.bloom.GetDataSize()); });
 }
 
-// --- RDB deserialization helpers ---
+// --- Shell construction for deserialization ---
 
 ScalingBloomFilter* ScalingBloomFilter::FromRdbShell(RdbShell shell) {
   auto* filter = static_cast<ScalingBloomFilter*>(RMAlloc(sizeof(ScalingBloomFilter)));
   if (!filter) return nullptr;
 
   new (filter) ScalingBloomFilter(0, 0.01, BloomFlags::None, 2);
-  // Override fields from shell
   if (filter->layers_) {
     filter->layers_[0].bloom.~BloomLayer();
     RMFree(filter->layers_);
@@ -158,78 +157,5 @@ void ScalingBloomFilter::SetLayer(size_t index, FilterLayer&& layer) {
   }
 }
 
-// --- Wire format serialization ---
-
-size_t ComputeHeaderSize(const ScalingBloomFilter& filter) {
-  return sizeof(WireFilterHeader) + filter.NumLayers() * sizeof(WireLayerMeta);
-}
-
-size_t SerializeHeader(const ScalingBloomFilter& filter, void* output) {
-  auto* hdr = static_cast<WireFilterHeader*>(output);
-  hdr->totalItems = filter.TotalItems();
-  hdr->numLayers = static_cast<uint32_t>(filter.NumLayers());
-  hdr->flags = ToUnderlying(filter.Flags());
-  hdr->expansionFactor = filter.ExpansionFactor();
-
-  auto* meta = reinterpret_cast<WireLayerMeta*>(
-    static_cast<char*>(output) + sizeof(WireFilterHeader));
-
-  for (size_t i = 0; i < filter.NumLayers(); i++) {
-    const auto& layer = filter.Layers()[i];
-    meta[i] = {
-      .dataSize = layer.bloom.GetDataSize(),
-      .totalBits = layer.bloom.GetTotalBits(),
-      .itemCount = layer.itemCount,
-      .fpRate = layer.bloom.GetFpRate(),
-      .bitsPerEntry = layer.bloom.GetBitsPerEntry(),
-      .hashCount = layer.bloom.GetHashCount(),
-      .capacity = layer.bloom.GetCapacity(),
-      .log2Bits = layer.bloom.GetLog2Bits(),
-    };
-  }
-
-  return sizeof(WireFilterHeader) + filter.NumLayers() * sizeof(WireLayerMeta);
-}
-
-ScalingBloomFilter* DeserializeHeader(const void* data, size_t length) {
-  if (length < sizeof(WireFilterHeader)) return nullptr;
-
-  const auto* hdr = static_cast<const WireFilterHeader*>(data);
-  size_t required = sizeof(WireFilterHeader) + hdr->numLayers * sizeof(WireLayerMeta);
-  if (length < required) return nullptr;
-
-  auto* filter = ScalingBloomFilter::FromRdbShell({
-    .totalItems = hdr->totalItems,
-    .numLayers = hdr->numLayers,
-    .flags = FromUnderlying(hdr->flags),
-    .expansionFactor = hdr->expansionFactor,
-  });
-  if (!filter) return nullptr;
-
-  const auto* meta = reinterpret_cast<const WireLayerMeta*>(
-    static_cast<const char*>(data) + sizeof(WireFilterHeader));
-
-  for (size_t i = 0; i < hdr->numLayers; i++) {
-    auto* bitArray = static_cast<uint8_t*>(RMCalloc(meta[i].dataSize, 1));
-    if (!bitArray) {
-      filter->~ScalingBloomFilter();
-      RMFree(filter);
-      return nullptr;
-    }
-    auto layer = BloomLayer::FromRdb({
-      .hashCount = meta[i].hashCount,
-      .log2Bits = meta[i].log2Bits,
-      .capacity = meta[i].capacity,
-      .fpRate = meta[i].fpRate,
-      .bitsPerEntry = meta[i].bitsPerEntry,
-      .totalBits = meta[i].totalBits,
-      .dataSize = meta[i].dataSize,
-      .use64Bit = HasFlag(FromUnderlying(hdr->flags), BloomFlags::Use64Bit),
-      .bitArray = bitArray,
-      .itemCount = meta[i].itemCount,
-    });
-    filter->SetLayer(i, {std::move(layer), meta[i].itemCount});
-  }
-
-  return filter;
-}
+// SerializeHeader, DeserializeHeader, WriteTo, ReadFrom live in bloom_rdb.cc
+// to keep Redis Module API dependencies out of test builds.

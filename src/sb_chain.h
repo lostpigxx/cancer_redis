@@ -47,7 +47,11 @@ public:
   BloomFlags Flags() const { return flags_; }
   unsigned ExpansionFactor() const { return expansionFactor_; }
 
-  // For RDB deserialization: construct empty shell, then populate layers externally
+  // RDB serialization: the filter writes/reads its own structure
+  void WriteTo(RdbWriter& w) const;
+  static ScalingBloomFilter* ReadFrom(RdbReader& r, int encver);
+
+  // For SCANDUMP deserialization: construct empty shell, then populate layers
   struct RdbShell {
     size_t totalItems;
     size_t numLayers;

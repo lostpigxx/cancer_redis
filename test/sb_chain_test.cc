@@ -135,38 +135,9 @@ TEST(ScalingBloomTest, BytesUsed) {
   free(mem);
 }
 
-TEST(ScalingBloomTest, SerializeDeserializeHeader) {
-  auto* mem = static_cast<ScalingBloomFilter*>(malloc(sizeof(ScalingBloomFilter)));
-  new (mem) ScalingBloomFilter(1000, 0.01, DefaultFlags(), 2);
-
-  for (int i = 0; i < 100; i++) {
-    auto item = "ser_" + std::to_string(i);
-    mem->Put(ToSpan(item));
-  }
-
-  size_t hdrSize = ComputeHeaderSize(*mem);
-  std::vector<char> buf(hdrSize);
-  SerializeHeader(*mem, buf.data());
-
-  auto* restored = DeserializeHeader(buf.data(), buf.size());
-  ASSERT_NE(restored, nullptr);
-
-  EXPECT_EQ(restored->TotalItems(), mem->TotalItems());
-  EXPECT_EQ(restored->NumLayers(), mem->NumLayers());
-  EXPECT_EQ(ToUnderlying(restored->Flags()), ToUnderlying(mem->Flags()));
-  EXPECT_EQ(restored->ExpansionFactor(), mem->ExpansionFactor());
-
-  for (size_t i = 0; i < restored->NumLayers(); i++) {
-    EXPECT_EQ(restored->Layers()[i].bloom.GetCapacity(), mem->Layers()[i].bloom.GetCapacity());
-    EXPECT_EQ(restored->Layers()[i].bloom.GetHashCount(), mem->Layers()[i].bloom.GetHashCount());
-    EXPECT_EQ(restored->Layers()[i].bloom.GetTotalBits(), mem->Layers()[i].bloom.GetTotalBits());
-  }
-
-  restored->~ScalingBloomFilter();
-  free(restored);
-  mem->~ScalingBloomFilter();
-  free(mem);
-}
+// SerializeDeserializeHeader test is covered by TCL integration tests
+// (SCANDUMP/LOADCHUNK round-trip) since the serialization code depends
+// on the Redis Module API.
 
 TEST(ScalingBloomTest, SpanInterface) {
   auto* mem = static_cast<ScalingBloomFilter*>(malloc(sizeof(ScalingBloomFilter)));

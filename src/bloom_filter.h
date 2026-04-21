@@ -62,6 +62,11 @@ inline std::span<const std::byte> AsBytes(const void* data, size_t len) {
   return {static_cast<const std::byte*>(data), len};
 }
 
+// Forward declarations for serialization
+class RdbWriter;
+class RdbReader;
+struct WireLayerMeta;
+
 // --- Single bloom filter layer (RAII) ---
 class BloomLayer {
 public:
@@ -77,20 +82,13 @@ public:
   static std::optional<BloomLayer> Create(uint64_t cap, double falsePositiveRate,
                                            BloomFlags flags);
 
-  // Construct from pre-loaded RDB fields (no allocation, caller provides bitArray)
-  struct RdbParams {
-    uint32_t hashCount;
-    uint8_t log2Bits;
-    uint64_t capacity;
-    double fpRate;
-    double bitsPerEntry;
-    uint64_t totalBits;
-    uint64_t dataSize;
-    bool use64Bit;
-    uint8_t* bitArray;
-    size_t itemCount;
-  };
-  static BloomLayer FromRdb(RdbParams params);
+  // Serialization: each object knows how to persist itself
+  void WriteTo(RdbWriter& w) const;
+  static std::optional<BloomLayer> ReadFrom(RdbReader& r, BloomFlags filterFlags);
+
+  // Wire format conversion for SCANDUMP/LOADCHUNK
+  WireLayerMeta ToWireMeta(size_t itemCount) const;
+  static BloomLayer FromWireMeta(const WireLayerMeta& meta, BloomFlags filterFlags);
 
   bool Test(const HashPair& hp) const;
   bool Insert(const HashPair& hp);
