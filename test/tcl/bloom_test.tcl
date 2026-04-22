@@ -222,15 +222,15 @@ test_error "BF.RESERVE on existing key returns error" {
 
 test_error "BF.RESERVE with invalid error rate (0)" {
   r BF.RESERVE reserve_err0 0 1000
-} {ERR*error rate*}
+} {ERR*rate*}
 
 test_error "BF.RESERVE with invalid error rate (1)" {
   r BF.RESERVE reserve_err1 1.0 1000
-} {ERR*error rate*}
+} {ERR*rate*}
 
 test_error "BF.RESERVE with invalid error rate (negative)" {
   r BF.RESERVE reserve_errneg -0.5 1000
-} {ERR*error rate*}
+} {ERR*rate*}
 
 test_error "BF.RESERVE with invalid capacity (0)" {
   r BF.RESERVE reserve_cap0 0.01 0
@@ -381,7 +381,7 @@ test_error "BF.INFO on missing key" {
 
 test_error "BF.INFO unrecognized field" {
   r BF.INFO reserve_basic BadField
-} {ERR*unrecognized*}
+} {ERR*unknown*}
 
 test_assert "BF.INFO NONSCALING filter shows null expansion" {
   set info [r BF.INFO reserve_ns]

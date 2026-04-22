@@ -8,6 +8,9 @@
 #include <optional>
 #include <span>
 
+// Error tightening ratio from Almeida et al. (2007) §3:
+// each successive layer halves the per-layer FP rate so the
+// overall rate converges to the user-specified target.
 constexpr double kTighteningRatio = 0.5;
 
 // One layer in a scaling bloom filter.
@@ -63,6 +66,8 @@ public:
 
 private:
   HashPair ComputeHash(std::span<const std::byte> data) const;
+  bool IsDuplicate(const HashPair& hp) const;
+  bool GrowIfNeeded();
   bool AppendLayer(uint64_t cap, double rate);
 
   FilterLayer* layers_ = nullptr;

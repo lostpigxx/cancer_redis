@@ -6,6 +6,8 @@
 #include <cstring>
 #include <ranges>
 
+// --- Lifecycle ---
+
 ScalingBloomFilter::ScalingBloomFilter(uint64_t initialCapacity, double errorRate,
                                         BloomFlags flg, unsigned expansion)
     : flags_(flg), expansionFactor_(expansion) {
@@ -54,6 +56,8 @@ ScalingBloomFilter& ScalingBloomFilter::operator=(ScalingBloomFilter&& other) no
   return *this;
 }
 
+// --- Internal helpers ---
+
 bool ScalingBloomFilter::AppendLayer(uint64_t cap, double rate) {
   if (numLayers_ >= layerCapacity_) {
     size_t newCap = std::max(layerCapacity_ * 2, size_t{4});
@@ -78,37 +82,40 @@ HashPair ScalingBloomFilter::ComputeHash(std::span<const std::byte> data) const 
     : Hash32Policy::Compute(data);
 }
 
+bool ScalingBloomFilter::IsDuplicate(const HashPair& hp) const {
+  return std::ranges::any_of(Layers(), [&](const FilterLayer& layer) {
+    return layer.bloom.Test(hp);
+  });
+}
+
+bool ScalingBloomFilter::GrowIfNeeded() {
+  auto& top = layers_[numLayers_ - 1];
+  if (top.itemCount < top.bloom.GetCapacity()) return true;
+  if (HasFlag(flags_, BloomFlags::FixedSize)) return false;
+
+  // Almeida et al. (2007): each new layer doubles capacity and halves FP rate
+  uint64_t nextCap = top.bloom.GetCapacity() * expansionFactor_;
+  double nextRate = top.bloom.GetFpRate() * kTighteningRatio;
+  return (nextRate > 0.0) && AppendLayer(nextCap, nextRate);
+}
+
+// --- Public API ---
+
 std::optional<bool> ScalingBloomFilter::Put(std::span<const std::byte> data) {
   auto hp = ComputeHash(data);
 
-  auto layerSpan = Layers();
-  for (auto& layer : std::views::reverse(layerSpan)) {
-    if (layer.bloom.Test(hp)) return false;
-  }
+  if (IsDuplicate(hp)) return false;
+  if (!GrowIfNeeded()) return std::nullopt;
 
-  auto& top = layers_[numLayers_ - 1];
-  if (top.itemCount >= top.bloom.GetCapacity()) {
-    if (HasFlag(flags_, BloomFlags::FixedSize)) return std::nullopt;
-
-    uint64_t nextCap = top.bloom.GetCapacity() * expansionFactor_;
-    double nextRate = top.bloom.GetFpRate() * kTighteningRatio;
-    if (nextRate <= 0.0) return std::nullopt;
-    if (!AppendLayer(nextCap, nextRate)) return std::nullopt;
-  }
-
-  auto& current = layers_[numLayers_ - 1];
-  current.bloom.Insert(hp);
-  current.itemCount++;
+  auto& target = layers_[numLayers_ - 1];
+  target.bloom.Insert(hp);
+  target.itemCount++;
   totalItems_++;
   return true;
 }
 
 bool ScalingBloomFilter::Contains(std::span<const std::byte> data) const {
-  auto hp = ComputeHash(data);
-  auto layerSpan = Layers();
-  return std::ranges::any_of(layerSpan, [&](const FilterLayer& layer) {
-    return layer.bloom.Test(hp);
-  });
+  return IsDuplicate(ComputeHash(data));
 }
 
 uint64_t ScalingBloomFilter::TotalCapacity() const {
@@ -157,5 +164,5 @@ void ScalingBloomFilter::SetLayer(size_t index, FilterLayer&& layer) {
   }
 }
 
-// SerializeHeader, DeserializeHeader, WriteTo, ReadFrom live in bloom_rdb.cc
+// WriteTo, ReadFrom, SerializeHeader, DeserializeHeader live in bloom_rdb.cc
 // to keep Redis Module API dependencies out of test builds.

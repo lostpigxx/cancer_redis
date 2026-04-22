@@ -6,26 +6,28 @@
 #include <bit>
 #include <cmath>
 #include <cstring>
+#include <numbers>
 
 // --- Hash policies ---
+// Seeds are required for data-level interoperability: they determine which
+// bits are set in the persisted bit array. Changing them would cause false
+// negatives when querying filters loaded from existing RDB files.
 
 HashPair Hash32Policy::Compute(std::span<const std::byte> data) {
   auto* ptr = reinterpret_cast<const void*>(data.data());
   auto len = static_cast<int>(data.size());
   uint32_t h1 = MurmurHash2(ptr, len, 0x9747b28c);
-  uint32_t h2 = MurmurHash2(ptr, len, h1);
-  return {h1, h2};
+  return {h1, MurmurHash2(ptr, len, h1)};
 }
 
 HashPair Hash64Policy::Compute(std::span<const std::byte> data) {
   auto* ptr = reinterpret_cast<const void*>(data.data());
   auto len = static_cast<int>(data.size());
   uint64_t h1 = MurmurHash64A(ptr, len, 0xc6a4a7935bd1e995ULL);
-  uint64_t h2 = MurmurHash64A(ptr, len, h1);
-  return {h1, h2};
+  return {h1, MurmurHash64A(ptr, len, h1)};
 }
 
-// --- BloomLayer ---
+// --- BloomLayer lifecycle ---
 
 BloomLayer::~BloomLayer() {
   if (bitArray_) {
@@ -64,6 +66,21 @@ BloomLayer& BloomLayer::operator=(BloomLayer&& other) noexcept {
   return *this;
 }
 
+// --- Optimal parameter computation ---
+// Formulas from Mitzenmacher & Upfal, "Probability and Computing" (2005):
+//   m/n = -log2(p) / ln(2)       (bits per entry)
+//   k   = (m/n) * ln(2)           (optimal hash count)
+
+static double OptimalBitsPerEntry(double fpRate) {
+  constexpr double kLn2Squared = std::numbers::ln2 * std::numbers::ln2;
+  return -std::log(fpRate) / kLn2Squared;
+}
+
+static uint32_t OptimalHashCount(double bitsPerEntry) {
+  return std::max(1u,
+    static_cast<uint32_t>(std::ceil(std::numbers::ln2 * bitsPerEntry)));
+}
+
 std::optional<BloomLayer> BloomLayer::Create(uint64_t cap, double falsePositiveRate,
                                               BloomFlags flags) {
   BloomLayer layer;
@@ -76,12 +93,10 @@ std::optional<BloomLayer> BloomLayer::Create(uint64_t cap, double falsePositiveR
     layer.totalBits_ = cap;
     layer.hashCount_ = 0;
   } else {
-    double ln2 = std::log(2.0);
-    layer.bitsPerEntry_ = -(std::log(falsePositiveRate) / (ln2 * ln2));
-    double rawBits = static_cast<double>(cap) * layer.bitsPerEntry_;
+    layer.bitsPerEntry_ = OptimalBitsPerEntry(falsePositiveRate);
+    auto rawBits = static_cast<double>(cap) * layer.bitsPerEntry_;
     layer.totalBits_ = static_cast<uint64_t>(std::max(rawBits, 1024.0));
-    layer.hashCount_ = std::max(1u,
-      static_cast<uint32_t>(std::ceil(ln2 * layer.bitsPerEntry_)));
+    layer.hashCount_ = OptimalHashCount(layer.bitsPerEntry_);
   }
 
   if (!HasFlag(flags, BloomFlags::NoRound)) {
@@ -98,43 +113,49 @@ std::optional<BloomLayer> BloomLayer::Create(uint64_t cap, double falsePositiveR
   return layer;
 }
 
+// --- Bit-level operations ---
+
+uint64_t BloomLayer::ComputeModuloMask() const {
+  return (1ULL << log2Bits_) - 1;
+}
+
+bool BloomLayer::TestBit(uint64_t bitIndex) const {
+  auto [byteOff, mask] = ResolveBit(bitIndex);
+  return (bitArray_[byteOff] & mask) != 0;
+}
+
+void BloomLayer::SetBit(uint64_t bitIndex) {
+  auto [byteOff, mask] = ResolveBit(bitIndex);
+  bitArray_[byteOff] |= mask;
+}
+
+// --- Membership queries ---
+// Uses Kirsch-Mitzenmacher enhanced double hashing to derive k probe
+// positions from a single HashPair. Reference: Kirsch & Mitzenmacher,
+// "Less Hashing, Same Performance" (ESA 2006).
+
 bool BloomLayer::Test(const HashPair& hp) const {
-  if (log2Bits_ > 0) {
-    uint64_t mask = (1ULL << log2Bits_) - 1;
-    for (uint32_t i = 0; i < hashCount_; i++) {
-      uint64_t pos = (hp.primary + i * hp.secondary) & mask;
-      if (!(bitArray_[pos >> 3] & (1 << (pos & 7)))) return false;
-    }
-  } else {
-    for (uint32_t i = 0; i < hashCount_; i++) {
-      uint64_t pos = (hp.primary + i * hp.secondary) % totalBits_;
-      if (!(bitArray_[pos >> 3] & (1 << (pos & 7)))) return false;
-    }
+  bool isPow2 = IsPowerOfTwo();
+  uint64_t mask = isPow2 ? ComputeModuloMask() : 0;
+
+  for (uint32_t probe = 0; probe < hashCount_; probe++) {
+    uint64_t pos = ProbePosition(hp, probe, mask, totalBits_, isPow2);
+    if (!TestBit(pos)) return false;
   }
   return true;
 }
 
 bool BloomLayer::Insert(const HashPair& hp) {
-  bool wasNew = false;
-  if (log2Bits_ > 0) {
-    uint64_t mask = (1ULL << log2Bits_) - 1;
-    for (uint32_t i = 0; i < hashCount_; i++) {
-      uint64_t pos = (hp.primary + i * hp.secondary) & mask;
-      uint8_t bit = 1 << (pos & 7);
-      if (!(bitArray_[pos >> 3] & bit)) {
-        wasNew = true;
-        bitArray_[pos >> 3] |= bit;
-      }
-    }
-  } else {
-    for (uint32_t i = 0; i < hashCount_; i++) {
-      uint64_t pos = (hp.primary + i * hp.secondary) % totalBits_;
-      uint8_t bit = 1 << (pos & 7);
-      if (!(bitArray_[pos >> 3] & bit)) {
-        wasNew = true;
-        bitArray_[pos >> 3] |= bit;
-      }
+  bool isPow2 = IsPowerOfTwo();
+  uint64_t mask = isPow2 ? ComputeModuloMask() : 0;
+  bool anyNew = false;
+
+  for (uint32_t probe = 0; probe < hashCount_; probe++) {
+    uint64_t pos = ProbePosition(hp, probe, mask, totalBits_, isPow2);
+    if (!TestBit(pos)) {
+      SetBit(pos);
+      anyNew = true;
     }
   }
-  return wasNew;
+  return anyNew;
 }
