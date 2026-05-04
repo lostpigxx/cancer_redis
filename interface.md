@@ -1767,17 +1767,17 @@ actual_len = min(length, old_size // 16)
 def corrupt_sst_checksum_area(self, path: str) -> Tuple[int, int, int]
 ```
 
-按 RocksDB 9.2.1 block-based table 格式解析 SST footer 和 index block，选择一个 data block handle，并只翻转该 data block trailer 中的 4 字节 checksum 区域。
+按 RocksDB 9.2.1 block-based table 格式解析 SST footer，定位 metaindex block，并只翻转该 block trailer 中的 4 字节 checksum 区域。
 
 版本约束：
 
 - RocksDB 版本：`9.2.1`。
 - 仅支持 block-based table SST。
 - 通过 SST 末尾 magic number 判断 footer 类型，不做 48/53 字节长度猜测。
-- legacy block-based table magic 使用 legacy footer，index handle 直接存于 footer。
+- legacy block-based table magic 使用 legacy footer，metaindex handle 直接存于 footer。
 - 新版 block-based table magic 使用 53 字节 footer；读取 footer version。
-- footer version `<= 5` 时，index handle 直接存于 footer。
-- footer version `>= 6` 时，footer 不保存 metaindex handle；从 footer 固定字段读取 `metaindex_size`，按 footer 前一段反推 metaindex block，再从 metaindex 的 `rocksdb.index` entry 读取 index handle。
+- footer version `<= 5` 时，metaindex handle 直接存于 footer。
+- footer version `>= 6` 时，footer 不保存 metaindex handle；从 footer 固定字段读取 `metaindex_size`，按 footer 前一段反推 metaindex block。
 
 RocksDB block trailer 结构：
 
@@ -1807,9 +1807,7 @@ RocksDB block trailer 结构：
 
 - SST 文件过小，无法解析 RocksDB 9.2.1 footer。
 - SST 文件 magic number 不是 RocksDB 9.2.1 block-based table magic。
-- footer version `>= 6` 时，metaindex 中找不到 `rocksdb.index`。
-- index block 压缩类型不是 `0`，当前 helper 无法解析压缩后的 index block。
-- index block 中找不到可用的 data block handle。
+- metaindex block handle 或由 `metaindex_size` 反推的 metaindex block 范围超出文件。
 - 计算出的 checksum offset 超出文件范围。
 
 注意：checksum 损坏通常在 RocksDB Open 读取 table block 时暴露；如果当前 RocksDB 配置不会在 Open 阶段校验对应 block，该类用例可能无法进入 `corrupted`。
