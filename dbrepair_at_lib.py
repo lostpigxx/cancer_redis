@@ -1835,6 +1835,65 @@ class RepairAT:
 
         return sorted(filter_handles, key=lambda item: item[0])[0]
 
+    def corrupt_sst_index_block_area(self, path: str) -> Tuple[int, int, int]:
+        """
+        解析 SST footer，找到 index block，并翻转该 block trailer 中的 checksum。
+
+        RocksDB block trailer 结构为：
+          1 byte compression type + 4 byte checksum
+        """
+        with open(path, "rb") as f:
+            data = f.read()
+
+        old_size = len(data)
+        index_offset, index_size = self._decode_sst_footer_index_handle(data)
+        offset = index_offset + index_size + 1
+        actual_len = 4
+
+        assert offset + actual_len <= old_size, (
+            "invalid SST index block corruption range: "
+            "path={}, size={}, index_offset={}, index_size={}, "
+            "offset={}, length={}".format(
+                path,
+                old_size,
+                index_offset,
+                index_size,
+                offset,
+                actual_len,
+            )
+        )
+
+        with open(path, "r+b") as f:
+            f.seek(offset)
+            checksum = f.read(actual_len)
+
+            assert len(checksum) == actual_len, (
+                "failed to read SST index checksum bytes: "
+                "path={}, offset={}".format(path, offset)
+            )
+
+            bad = bytes(b ^ 0xff for b in checksum)
+
+            f.seek(offset)
+            f.write(bad)
+            f.flush()
+            os.fsync(f.fileno())
+
+        print(
+            "corrupted SST index block area: "
+            "path={}, size={}, index_block_offset={}, index_block_size={}, "
+            "offset={}, length={}".format(
+                path,
+                old_size,
+                index_offset,
+                index_size,
+                offset,
+                actual_len,
+            )
+        )
+
+        return old_size, offset, actual_len
+
     def corrupt_sst_checksum_area(self, path: str) -> Tuple[int, int, int]:
         """
         解析 SST footer，找到 metaindex block，并翻转其 trailer 中的 checksum。
