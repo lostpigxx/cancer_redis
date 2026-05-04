@@ -1639,43 +1639,98 @@ class RepairAT:
             )
         )
 
+        restart_offsets = [
+            int.from_bytes(
+                block[restarts_offset + i * 4:restarts_offset + (i + 1) * 4],
+                byteorder="little",
+            )
+            for i in range(restart_count)
+        ]
+
+        assert restart_offsets[0] == 0, (
+            "invalid SST {} first restart offset: "
+            "offset={}, size={}, first_restart={}".format(
+                block_name,
+                block_offset,
+                block_size,
+                restart_offsets[0],
+            )
+        )
+        assert all(r < restarts_offset for r in restart_offsets), (
+            "invalid SST {} restart offset outside entry area: "
+            "offset={}, size={}, restarts_offset={}, restart_offsets={}".format(
+                block_name,
+                block_offset,
+                block_size,
+                restarts_offset,
+                restart_offsets,
+            )
+        )
+
         entries: List[Tuple[bytes, bytes]] = []
-        last_key = b""
-        pos = 0
 
-        while pos < restarts_offset:
-            shared, pos = self._decode_varint32(block, pos, restarts_offset)
-            non_shared, pos = self._decode_varint32(block, pos, restarts_offset)
-            value_len, pos = self._decode_varint32(block, pos, restarts_offset)
-
-            assert shared <= len(last_key), (
-                "invalid SST {} entry shared prefix: shared={}, last_key_len={}".format(
-                    block_name,
-                    shared,
-                    len(last_key),
-                )
+        for restart_index, start in enumerate(restart_offsets):
+            end = (
+                restart_offsets[restart_index + 1]
+                if restart_index + 1 < restart_count
+                else restarts_offset
             )
-            assert pos + non_shared + value_len <= restarts_offset, (
-                "invalid SST {} entry: pos={}, shared={}, "
-                "non_shared={}, value_len={}, restarts_offset={}".format(
+
+            assert start < end, (
+                "invalid SST {} restart range: "
+                "offset={}, size={}, restart_index={}, start={}, end={}".format(
                     block_name,
-                    pos,
-                    shared,
-                    non_shared,
-                    value_len,
-                    restarts_offset,
+                    block_offset,
+                    block_size,
+                    restart_index,
+                    start,
+                    end,
                 )
             )
 
-            key_delta = block[pos:pos + non_shared]
-            pos += non_shared
+            last_key = b""
+            pos = start
 
-            value = block[pos:pos + value_len]
-            pos += value_len
+            while pos < end:
+                entry_start = pos
 
-            key = last_key[:shared] + key_delta
-            entries.append((key, value))
-            last_key = key
+                shared, pos = self._decode_varint32(block, pos, end)
+                non_shared, pos = self._decode_varint32(block, pos, end)
+                value_len, pos = self._decode_varint32(block, pos, end)
+
+                assert shared <= len(last_key), (
+                    "invalid SST {} entry shared prefix: "
+                    "restart_index={}, entry_start={}, shared={}, last_key_len={}".format(
+                        block_name,
+                        restart_index,
+                        entry_start,
+                        shared,
+                        len(last_key),
+                    )
+                )
+                assert pos + non_shared + value_len <= end, (
+                    "invalid SST {} entry: restart_index={}, entry_start={}, "
+                    "pos={}, shared={}, non_shared={}, value_len={}, end={}".format(
+                        block_name,
+                        restart_index,
+                        entry_start,
+                        pos,
+                        shared,
+                        non_shared,
+                        value_len,
+                        end,
+                    )
+                )
+
+                key_delta = block[pos:pos + non_shared]
+                pos += non_shared
+
+                value = block[pos:pos + value_len]
+                pos += value_len
+
+                key = last_key[:shared] + key_delta
+                entries.append((key, value))
+                last_key = key
 
         return entries
 
