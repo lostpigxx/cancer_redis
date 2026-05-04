@@ -72,10 +72,24 @@ def test_s8_sst_filter_block_corrupted_and_repair():
 
     # ---------- T6：等待 corrupted ----------
 
-    corrupted = ctx.wait_corrupted(
-        target=target,
-        timeout_sec=30,
-    )
+    try:
+        corrupted = ctx.wait_corrupted(
+            target=target,
+            timeout_sec=30,
+        )
+    except AssertionError as exc:
+        current = ctx.get_partition(target.partition_id)
+
+        if current.state in ("opened", "open"):
+            raise AssertionError(
+                "SST filter block handle corruption did not make partition "
+                "corrupted during RocksDB Open. Current RocksDB configuration "
+                "may not validate filter metadata on Open: last={}".format(
+                    current,
+                )
+            ) from exc
+
+        raise
 
     assert corrupted.owner == target.owner
     assert corrupted.shard_port == target.shard_port

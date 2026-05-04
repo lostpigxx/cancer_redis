@@ -1456,6 +1456,55 @@ class RepairAT:
             )
         )
 
+    def _crc32c(self, data: bytes) -> int:
+        table = getattr(self, "_crc32c_table", None)
+
+        if table is None:
+            table = []
+
+            for i in range(256):
+                crc = i
+
+                for _ in range(8):
+                    if crc & 1:
+                        crc = (crc >> 1) ^ 0x82f63b78
+                    else:
+                        crc >>= 1
+
+                table.append(crc & 0xffffffff)
+
+            self._crc32c_table = table
+
+        crc = 0xffffffff
+
+        for b in data:
+            crc = table[(crc ^ b) & 0xff] ^ (crc >> 8)
+
+        return crc ^ 0xffffffff
+
+    def _masked_crc32c(self, data: bytes) -> int:
+        crc = self._crc32c(data)
+        return (((crc >> 15) | ((crc << 17) & 0xffffffff)) + 0xa282ead8) & 0xffffffff
+
+    def _refresh_sst_block_checksum(
+        self,
+        data: bytearray,
+        block_offset: int,
+        block_size: int,
+    ) -> int:
+        block_end = block_offset + block_size
+        compression_type = data[block_end:block_end + 1]
+        checksum = self._masked_crc32c(
+            bytes(data[block_offset:block_end]) + bytes(compression_type)
+        )
+        checksum_offset = block_end + 1
+        data[checksum_offset:checksum_offset + 4] = checksum.to_bytes(
+            4,
+            byteorder="little",
+        )
+
+        return checksum_offset
+
     def _decode_sst_footer_metaindex_handle(
         self,
         data: bytes,
@@ -1546,13 +1595,13 @@ class RepairAT:
 
         return metaindex_offset, metaindex_size
 
-    def _decode_sst_block_entries(
+    def _decode_sst_block_entries_with_value_offsets(
         self,
         data: bytes,
         block_offset: int,
         block_size: int,
         block_name: str,
-    ) -> List[Tuple[bytes, bytes]]:
+    ) -> List[Tuple[bytes, bytes, int, int]]:
         block_end = block_offset + block_size
         compression_type = data[block_end]
 
@@ -1589,7 +1638,7 @@ class RepairAT:
             )
         )
 
-        entries: List[Tuple[bytes, bytes]] = []
+        entries: List[Tuple[bytes, bytes, int, int]] = []
         last_key = b""
         pos = 0
 
@@ -1636,29 +1685,50 @@ class RepairAT:
             key_delta = block[pos:pos + non_shared]
             pos += non_shared
 
+            value_start = pos
             value = block[pos:pos + value_len]
             pos += value_len
 
             key = last_key[:shared] + key_delta
-            entries.append((key, value))
+            entries.append((key, value, block_offset + value_start, value_len))
             last_key = key
 
         return entries
 
-    def _decode_sst_filter_block_handle(self, data: bytes) -> Tuple[bytes, int, int]:
+    def _decode_sst_block_entries(
+        self,
+        data: bytes,
+        block_offset: int,
+        block_size: int,
+        block_name: str,
+    ) -> List[Tuple[bytes, bytes]]:
+        return [
+            (key, value)
+            for key, value, _, _ in self._decode_sst_block_entries_with_value_offsets(
+                data,
+                block_offset,
+                block_size,
+                block_name,
+            )
+        ]
+
+    def _decode_sst_filter_block_handle(
+        self,
+        data: bytes,
+    ) -> Tuple[bytes, int, int, int, int, int, int]:
         metaindex_offset, metaindex_size = self._decode_sst_footer_metaindex_handle(
             data,
         )
-        meta_entries = self._decode_sst_block_entries(
+        meta_entries = self._decode_sst_block_entries_with_value_offsets(
             data,
             metaindex_offset,
             metaindex_size,
             "metaindex",
         )
 
-        filter_handles: List[Tuple[bytes, int, int]] = []
+        filter_handles: List[Tuple[bytes, int, int, int, int, int, int]] = []
 
-        for key, value in meta_entries:
+        for key, value, value_offset, value_len in meta_entries:
             if b"filter" not in key.lower():
                 continue
 
@@ -1684,7 +1754,17 @@ class RepairAT:
             except AssertionError:
                 continue
 
-            filter_handles.append((key, filter_offset, filter_size))
+            filter_handles.append(
+                (
+                    key,
+                    filter_offset,
+                    filter_size,
+                    value_offset,
+                    value_len,
+                    metaindex_offset,
+                    metaindex_size,
+                )
+            )
 
         assert filter_handles, (
             "no filter block handle found in SST metaindex"
@@ -1755,69 +1835,81 @@ class RepairAT:
 
     def corrupt_sst_filter_block_area(self, path: str) -> Tuple[int, int, int]:
         """
-        解析 SST metaindex，找到 filter block，并翻转该 block trailer 中的 checksum。
+        解析 SST metaindex，找到 filter block handle，并破坏该 handle。
 
-        RocksDB block trailer 结构为：
-          1 byte compression type + 4 byte checksum
+        修改 metaindex block 内容后会重新计算 metaindex block trailer checksum，
+        使 Open 阶段能读到合法 metaindex block，但解析 filter handle 失败。
         """
         with open(path, "rb") as f:
-            data = f.read()
+            data = bytearray(f.read())
 
         old_size = len(data)
-        filter_key, filter_offset, filter_size = self._decode_sst_filter_block_handle(
-            data,
+        (
+            filter_key,
+            filter_offset,
+            filter_size,
+            handle_offset,
+            handle_len,
+            metaindex_offset,
+            metaindex_size,
+        ) = self._decode_sst_filter_block_handle(
+            bytes(data),
         )
-        offset = filter_offset + filter_size + 1
-        actual_len = 4
 
-        assert offset + actual_len <= old_size, (
+        assert handle_len > 0, (
+            "empty SST filter block handle: path={}, filter_key={!r}".format(
+                path,
+                filter_key,
+            )
+        )
+        assert handle_offset + handle_len <= old_size, (
             "invalid SST filter block corruption range: "
             "path={}, size={}, filter_key={!r}, filter_offset={}, "
-            "filter_size={}, offset={}, length={}".format(
+            "filter_size={}, handle_offset={}, handle_len={}".format(
                 path,
                 old_size,
                 filter_key,
                 filter_offset,
                 filter_size,
-                offset,
-                actual_len,
+                handle_offset,
+                handle_len,
             )
         )
 
+        data[handle_offset:handle_offset + handle_len] = b"\xff" * handle_len
+        checksum_offset = self._refresh_sst_block_checksum(
+            data,
+            metaindex_offset,
+            metaindex_size,
+        )
+
         with open(path, "r+b") as f:
-            f.seek(offset)
-            checksum = f.read(actual_len)
-
-            assert len(checksum) == actual_len, (
-                "failed to read SST filter checksum bytes: "
-                "path={}, offset={}".format(
-                    path,
-                    offset,
-                )
-            )
-
-            bad = bytes(b ^ 0xff for b in checksum)
-
-            f.seek(offset)
-            f.write(bad)
+            f.seek(handle_offset)
+            f.write(data[handle_offset:handle_offset + handle_len])
+            f.seek(checksum_offset)
+            f.write(data[checksum_offset:checksum_offset + 4])
             f.flush()
             os.fsync(f.fileno())
 
         print(
             "corrupted SST filter block area: "
             "path={}, size={}, filter_key={!r}, filter_offset={}, "
-            "filter_size={}, offset={}, length={}".format(
+            "filter_size={}, handle_offset={}, handle_len={}, "
+            "metaindex_offset={}, metaindex_size={}, checksum_offset={}".format(
                 path,
                 old_size,
                 filter_key,
                 filter_offset,
                 filter_size,
-                offset,
-                actual_len,
+                handle_offset,
+                handle_len,
+                metaindex_offset,
+                metaindex_size,
+                checksum_offset,
             )
         )
 
-        return old_size, offset, actual_len
+        return old_size, handle_offset, handle_len
 
     # ----------------------------------------------------------------------
     # Repair

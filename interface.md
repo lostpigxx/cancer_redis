@@ -1818,7 +1818,9 @@ RocksDB block trailer 结构：
 def corrupt_sst_filter_block_area(self, path: str) -> Tuple[int, int, int]
 ```
 
-按 RocksDB 9.2.1 block-based table 格式解析 SST footer 和 metaindex，选择 metaindex 中 key 包含 `filter` 的 block handle，并翻转该 filter block trailer 中的 4 字节 checksum 区域。
+按 RocksDB 9.2.1 block-based table 格式解析 SST footer 和 metaindex，选择 metaindex 中 key 包含 `filter` 的 block handle，破坏该 handle 的编码内容，并重新计算 metaindex block trailer 中的 4 字节 checksum。
+
+这样 metaindex block 本身仍能通过 checksum 校验，但 Open 阶段解析 filter block handle 时会读到非法 handle，更适合验证 filter metadata 损坏能否触发 `corrupted`。
 
 版本约束同 `corrupt_sst_checksum_area()`：
 
@@ -1851,8 +1853,8 @@ RocksDB block trailer 结构：
 | 返回元素 | 类型 | 含义 |
 |---|---:|---|
 | `old_size` | `int` | 覆盖前文件大小。 |
-| `offset` | `int` | filter block checksum 覆盖起始 offset。 |
-| `actual_len` | `int` | 实际覆盖长度，固定为 `4`。 |
+| `offset` | `int` | filter block handle 覆盖起始 offset。 |
+| `actual_len` | `int` | 实际覆盖长度，即 filter block handle 编码长度。 |
 
 失败条件：
 
@@ -1861,9 +1863,9 @@ RocksDB block trailer 结构：
 - metaindex block 压缩类型不是 `0`，当前 helper 无法解析压缩后的 metaindex block。
 - metaindex 中找不到 key 包含 `filter` 的 block handle。
 - filter block handle 超出文件范围。
-- 计算出的 checksum offset 超出文件范围。
+- filter block handle 编码 offset 超出文件范围。
 
-注意：filter block 损坏通常依赖 RocksDB Open 或后续读取路径加载 filter block 时暴露；如果当前 RocksDB 配置不会在 Open 阶段校验该 block，该类用例可能无法进入 `corrupted`。
+注意：如果当前 RocksDB 配置仍不会在 Open 阶段解析或校验 filter metadata，该类用例可能无法进入 `corrupted`。
 
 ## 12. Repair 接口
 
