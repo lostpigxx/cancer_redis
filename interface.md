@@ -1761,6 +1761,47 @@ actual_len = min(length, old_size // 16)
 
 注意：data block 损坏不一定在 RocksDB Open 阶段暴露。有些配置只会在 Get、Iterator 或 Compaction 读取该 block 时发现 checksum mismatch。
 
+### 11.6 `corrupt_sst_checksum_area()`
+
+```python
+def corrupt_sst_checksum_area(self, path: str) -> Tuple[int, int, int]
+```
+
+解析 SST footer 和 index block，选择一个 data block handle，并只翻转该 data block trailer 中的 4 字节 checksum 区域。
+
+RocksDB block trailer 结构：
+
+```text
+1 byte compression type + 4 byte checksum
+```
+
+| 参数 | 类型 | 含义 |
+|---|---:|---|
+| `path` | `str` | SST 文件路径。 |
+
+返回值：`Tuple[int, int, int]`。
+
+结构：
+
+```python
+(old_size, offset, actual_len)
+```
+
+| 返回元素 | 类型 | 含义 |
+|---|---:|---|
+| `old_size` | `int` | 覆盖前文件大小。 |
+| `offset` | `int` | checksum 覆盖起始 offset。 |
+| `actual_len` | `int` | 实际覆盖长度，固定为 `4`。 |
+
+失败条件：
+
+- SST 文件过小，无法解析 legacy footer。
+- index block 压缩类型不是 `0`，当前 helper 无法解析压缩后的 index block。
+- index block 中找不到可用的 data block handle。
+- 计算出的 checksum offset 超出文件范围。
+
+注意：checksum 损坏通常在 RocksDB Open 读取 table block 时暴露；如果当前 RocksDB 配置不会在 Open 阶段校验对应 block，该类用例可能无法进入 `corrupted`。
+
 ## 12. Repair 接口
 
 ### 12.1 `repair_partition()`
@@ -1864,7 +1905,7 @@ at.assert_values_missing_or_exact(expected)
 
 ### 13.3 SST 损坏类故障
 
-适用于删除 SST、截断 SST、损坏 SST tail、损坏 SST data block 区域等场景。
+适用于删除 SST、截断 SST、损坏 SST tail、损坏 SST data block 区域、损坏 SST checksum 区域等场景。
 
 ```python
 target = at.pick_target_partition()
@@ -1888,6 +1929,7 @@ at.delete_sst_file(sst)
 at.zero_sst_file(sst)
 at.corrupt_sst_tail(sst)
 at.corrupt_sst_data_block_area(sst)
+at.corrupt_sst_checksum_area(sst)
 ```
 
 ## 14. 接口副作用与注意事项

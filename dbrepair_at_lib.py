@@ -1365,6 +1365,264 @@ class RepairAT:
 
         return old_size, offset, actual_len
 
+    def _decode_varint32(
+        self,
+        data: bytes,
+        offset: int,
+        limit: int,
+    ) -> Tuple[int, int]:
+        value = 0
+        shift = 0
+        pos = offset
+
+        while pos < limit and shift <= 28:
+            b = data[pos]
+            pos += 1
+            value |= (b & 0x7f) << shift
+
+            if not b & 0x80:
+                return value, pos
+
+            shift += 7
+
+        raise AssertionError(
+            "failed to decode varint32: offset={}, limit={}".format(
+                offset,
+                limit,
+            )
+        )
+
+    def _decode_varint64(
+        self,
+        data: bytes,
+        offset: int,
+        limit: int,
+    ) -> Tuple[int, int]:
+        value = 0
+        shift = 0
+        pos = offset
+
+        while pos < limit and shift <= 63:
+            b = data[pos]
+            pos += 1
+            value |= (b & 0x7f) << shift
+
+            if not b & 0x80:
+                return value, pos
+
+            shift += 7
+
+        raise AssertionError(
+            "failed to decode varint64: offset={}, limit={}".format(
+                offset,
+                limit,
+            )
+        )
+
+    def _decode_sst_block_handle(
+        self,
+        data: bytes,
+        offset: int,
+        limit: int,
+    ) -> Tuple[int, int, int]:
+        block_offset, pos = self._decode_varint64(data, offset, limit)
+        block_size, pos = self._decode_varint64(data, pos, limit)
+
+        return block_offset, block_size, pos
+
+    def _decode_legacy_sst_index_handle(
+        self,
+        data: bytes,
+    ) -> Tuple[int, int]:
+        footer_size = 48
+        handle_area_size = 40
+        file_size = len(data)
+
+        assert file_size > footer_size, (
+            "SST file too small to decode legacy footer: size={}".format(
+                file_size,
+            )
+        )
+
+        footer_offset = file_size - footer_size
+        _, _, pos = self._decode_sst_block_handle(
+            data,
+            footer_offset,
+            footer_offset + handle_area_size,
+        )
+        index_offset, index_size, _ = self._decode_sst_block_handle(
+            data,
+            pos,
+            footer_offset + handle_area_size,
+        )
+
+        assert index_size > 0, (
+            "invalid SST index handle: offset={}, size={}".format(
+                index_offset,
+                index_size,
+            )
+        )
+        assert index_offset + index_size + 5 <= file_size, (
+            "SST index handle points outside file: "
+            "file_size={}, index_offset={}, index_size={}".format(
+                file_size,
+                index_offset,
+                index_size,
+            )
+        )
+
+        return index_offset, index_size
+
+    def _decode_sst_index_block_handles(
+        self,
+        data: bytes,
+        index_offset: int,
+        index_size: int,
+    ) -> List[Tuple[int, int]]:
+        block_end = index_offset + index_size
+        compression_type = data[block_end]
+
+        assert compression_type == 0, (
+            "SST index block is compressed or uses unsupported compression: "
+            "index_offset={}, index_size={}, compression_type={}".format(
+                index_offset,
+                index_size,
+                compression_type,
+            )
+        )
+
+        block = data[index_offset:block_end]
+        assert len(block) >= 8, (
+            "SST index block too small: index_offset={}, index_size={}".format(
+                index_offset,
+                index_size,
+            )
+        )
+
+        restart_count = int.from_bytes(block[-4:], byteorder="little")
+        restarts_size = restart_count * 4
+        restarts_offset = len(block) - 4 - restarts_size
+
+        assert restart_count > 0 and restarts_offset > 0, (
+            "invalid SST index restart array: "
+            "index_offset={}, index_size={}, restart_count={}".format(
+                index_offset,
+                index_size,
+                restart_count,
+            )
+        )
+
+        handles: List[Tuple[int, int]] = []
+        pos = 0
+
+        while pos < restarts_offset:
+            shared, pos = self._decode_varint32(block, pos, restarts_offset)
+            non_shared, pos = self._decode_varint32(block, pos, restarts_offset)
+            value_len, pos = self._decode_varint32(block, pos, restarts_offset)
+
+            assert pos + non_shared + value_len <= restarts_offset, (
+                "invalid SST index entry: pos={}, shared={}, "
+                "non_shared={}, value_len={}, restarts_offset={}".format(
+                    pos,
+                    shared,
+                    non_shared,
+                    value_len,
+                    restarts_offset,
+                )
+            )
+
+            pos += non_shared
+            value_start = pos
+            value_end = pos + value_len
+
+            try:
+                data_offset, data_size, data_pos = self._decode_sst_block_handle(
+                    block,
+                    value_start,
+                    value_end,
+                )
+
+                if data_pos == value_end and data_offset + data_size + 5 <= len(data):
+                    handles.append((data_offset, data_size))
+            except AssertionError:
+                pass
+
+            pos = value_end
+
+        return handles
+
+    def corrupt_sst_checksum_area(self, path: str) -> Tuple[int, int, int]:
+        """
+        解析 SST index block，找到一个 data block，并翻转其 trailer 中的 checksum。
+
+        RocksDB block trailer 结构为：
+          1 byte compression type + 4 byte checksum
+        """
+        with open(path, "rb") as f:
+            data = f.read()
+
+        old_size = len(data)
+        index_offset, index_size = self._decode_legacy_sst_index_handle(data)
+        data_handles = self._decode_sst_index_block_handles(
+            data,
+            index_offset,
+            index_size,
+        )
+
+        assert data_handles, (
+            "no data block handle found in SST index: path={}".format(path)
+        )
+
+        data_offset, data_size = sorted(data_handles)[0]
+        offset = data_offset + data_size + 1
+        actual_len = 4
+
+        assert offset + actual_len <= old_size, (
+            "invalid SST checksum corruption range: "
+            "path={}, size={}, data_offset={}, data_size={}, "
+            "offset={}, length={}".format(
+                path,
+                old_size,
+                data_offset,
+                data_size,
+                offset,
+                actual_len,
+            )
+        )
+
+        with open(path, "r+b") as f:
+            f.seek(offset)
+            checksum = f.read(actual_len)
+
+            assert len(checksum) == actual_len, (
+                "failed to read SST checksum bytes: path={}, offset={}".format(
+                    path,
+                    offset,
+                )
+            )
+
+            bad = bytes(b ^ 0xff for b in checksum)
+
+            f.seek(offset)
+            f.write(bad)
+            f.flush()
+            os.fsync(f.fileno())
+
+        print(
+            "corrupted SST checksum area: "
+            "path={}, size={}, data_block_offset={}, data_block_size={}, "
+            "offset={}, length={}".format(
+                path,
+                old_size,
+                data_offset,
+                data_size,
+                offset,
+                actual_len,
+            )
+        )
+
+        return old_size, offset, actual_len
+
     # ----------------------------------------------------------------------
     # Repair
     # ----------------------------------------------------------------------
