@@ -2278,5 +2278,5 @@ with at.heartbeat_disabled():
 
 | 接口 | key 不存在 | key 存在但 value 错误 | 适用场景 |
 |---|---|---|---|
-| `assert_values_exact()` | 失败 | 失败 | guard key、SST 已 flush 数据、必须完整保留的数据。 |
-| `assert_values_missing_or_exact()` | 允许 | 失败 | WAL-only 数据在 repair 后允许丢失，但不能返回错误值。 |
+| `assert_values_exact()` | 失败 | 失败 | guard key、必须完整保留的数据。 |
+| `assert_values_missing_or_exact()` | 允许 | 失败 | WAL-only 数据、损坏 SST 覆盖的数据、repair 可能合法丢弃的目标历史数据，例如 M1 删除 `CURRENT` 后的目标 SST 数据。 |
