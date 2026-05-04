@@ -1520,19 +1520,19 @@ class RepairAT:
             byteorder="little",
         )
 
-        metaindex_offset, metaindex_size, pos = self._decode_sst_block_handle(
-            data,
-            footer_offset + 1,
-            footer_offset + 1 + block_handle_area_size,
-        )
-        self._assert_sst_block_handle_in_file(
-            data,
-            metaindex_offset,
-            metaindex_size,
-            "metaindex block",
-        )
-
         if footer_version <= 5:
+            metaindex_offset, metaindex_size, pos = self._decode_sst_block_handle(
+                data,
+                footer_offset + 1,
+                footer_offset + 1 + block_handle_area_size,
+            )
+            self._assert_sst_block_handle_in_file(
+                data,
+                metaindex_offset,
+                metaindex_size,
+                "metaindex block",
+            )
+
             index_offset, index_size, _ = self._decode_sst_block_handle(
                 data,
                 pos,
@@ -1546,6 +1546,20 @@ class RepairAT:
             )
 
             return index_offset, index_size
+
+        metaindex_size_offset = footer_offset + 13
+        metaindex_size = int.from_bytes(
+            data[metaindex_size_offset:metaindex_size_offset + 4],
+            byteorder="little",
+        )
+        metaindex_offset = footer_offset - metaindex_size - 5
+
+        self._assert_sst_block_handle_in_file(
+            data,
+            metaindex_offset,
+            metaindex_size,
+            "format_version>=6 metaindex block",
+        )
 
         meta_entries = self._decode_sst_block_entries(
             data,

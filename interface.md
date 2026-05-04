@@ -1777,7 +1777,7 @@ def corrupt_sst_checksum_area(self, path: str) -> Tuple[int, int, int]
 - legacy block-based table magic 使用 legacy footer，index handle 直接存于 footer。
 - 新版 block-based table magic 使用 53 字节 footer；读取 footer version。
 - footer version `<= 5` 时，index handle 直接存于 footer。
-- footer version `>= 6` 时，index handle 不在 footer 中，必须从 metaindex 的 `rocksdb.index` entry 读取。
+- footer version `>= 6` 时，footer 不保存 metaindex handle；从 footer 固定字段读取 `metaindex_size`，按 footer 前一段反推 metaindex block，再从 metaindex 的 `rocksdb.index` entry 读取 index handle。
 
 RocksDB block trailer 结构：
 
