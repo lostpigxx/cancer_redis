@@ -57,6 +57,7 @@ import env as test_env
 | `WAL_MIDDLE_LOSS_GAP_SIZE` | `int` | WAL 单个 gap 目标大小，单位 byte。 |
 | `FLUSHMEM_COMMAND_TEMPLATE` | `List[str]` | flushmem 命令模板。支持 `{partition_id}` 和 `{shard_port}` 占位符。 |
 | `WAIT_SST_TIMEOUT_SEC` | `float` 或 `int` | 等待 flushmem 生成新 SST 的超时时间。 |
+| `MANIFEST_METADATA_TAMPER_COMMAND_TEMPLATE` | `List[str]` | 可选。M16 用于调用外部 lower-level MANIFEST 编辑工具；为空时该用例 skip。 |
 | `SST_PREPARE_WRITE_COUNT` | `int` | `prepare_sst_for_partition()` 默认写入 key 数量。 |
 | `SST_PREPARE_VALUE_SIZE` | `int` | `prepare_sst_for_partition()` 默认 value payload 长度。 |
 | `SST_DATA_BLOCK_MIN_FILE_SIZE` | `int` | `corrupt_sst_data_block_area()` 允许损坏 data block 区域的最小 SST 文件大小。 |
@@ -81,6 +82,27 @@ FLUSHMEM_COMMAND_TEMPLATE = ["flushmem", "{partition_id}"]
 ```text
 flushmem <partition-id>
 ```
+
+`MANIFEST_METADATA_TAMPER_COMMAND_TEMPLATE` 示例：
+
+```python
+MANIFEST_METADATA_TAMPER_COMMAND_TEMPLATE = [
+    "/path/to/manifest_tamper",
+    "--case", "{case_name}",
+    "--manifest", "{manifest_path}",
+    "--sst-file-number", "{sst_file_number}",
+    "--partition", "{partition_id}",
+]
+```
+
+M16 会在目标 shardsvr 停止后执行该命令。命令需要原地修改 `{manifest_path}`，并根据 `{case_name}` 实现：
+
+- `missing_sst_reference`
+- `wrong_file_number`
+- `wrong_level`
+- `wrong_key_range`
+
+支持占位符：`{case_name}`、`{partition_id}`、`{partition_db_dir}`、`{manifest_path}`、`{manifest_name}`、`{sst_path}`、`{sst_name}`、`{sst_file_number}`、`{shard_port}`。
 
 ### 1.3 目录约定
 

@@ -148,6 +148,37 @@ WAIT_COMPACT_TIMEOUT_SEC = 60
 
 
 # =============================================================================
+# MANIFEST 元数据编辑工具配置
+# =============================================================================
+
+# M16 依赖 lower-level MANIFEST 编辑工具，在当前 MANIFEST 中定向篡改 SST
+# metadata，例如引用不存在 SST、错误 file number、错误 level、错误 key range。
+#
+# 如果没有这类工具，保持空列表，M16 会 pytest.skip。
+#
+# 示例：
+# MANIFEST_METADATA_TAMPER_COMMAND_TEMPLATE = [
+#     "/path/to/manifest_tamper",
+#     "--case", "{case_name}",
+#     "--manifest", "{manifest_path}",
+#     "--sst-file-number", "{sst_file_number}",
+#     "--partition", "{partition_id}",
+# ]
+#
+# 支持占位符：
+#   {case_name}
+#   {partition_id}
+#   {partition_db_dir}
+#   {manifest_path}
+#   {manifest_name}
+#   {sst_path}
+#   {sst_name}
+#   {sst_file_number}
+#   {shard_port}
+MANIFEST_METADATA_TAMPER_COMMAND_TEMPLATE = []
+
+
+# =============================================================================
 # 默认写入参数
 # =============================================================================
 
