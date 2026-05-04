@@ -1546,6 +1546,152 @@ class RepairAT:
 
         return metaindex_offset, metaindex_size
 
+    def _decode_sst_block_entries(
+        self,
+        data: bytes,
+        block_offset: int,
+        block_size: int,
+        block_name: str,
+    ) -> List[Tuple[bytes, bytes]]:
+        block_end = block_offset + block_size
+        compression_type = data[block_end]
+
+        assert compression_type == 0, (
+            "SST {} block is compressed or uses unsupported compression: "
+            "offset={}, size={}, compression_type={}".format(
+                block_name,
+                block_offset,
+                block_size,
+                compression_type,
+            )
+        )
+
+        block = data[block_offset:block_end]
+        assert len(block) >= 8, (
+            "SST {} block too small: offset={}, size={}".format(
+                block_name,
+                block_offset,
+                block_size,
+            )
+        )
+
+        restart_count = int.from_bytes(block[-4:], byteorder="little")
+        restarts_size = restart_count * 4
+        restarts_offset = len(block) - 4 - restarts_size
+
+        assert restart_count > 0 and restarts_offset > 0, (
+            "invalid SST {} restart array: "
+            "offset={}, size={}, restart_count={}".format(
+                block_name,
+                block_offset,
+                block_size,
+                restart_count,
+            )
+        )
+
+        entries: List[Tuple[bytes, bytes]] = []
+        last_key = b""
+        pos = 0
+
+        while pos < restarts_offset:
+            entry_start = pos
+
+            try:
+                shared, pos = self._decode_varint32(block, pos, restarts_offset)
+                non_shared, pos = self._decode_varint32(block, pos, restarts_offset)
+                value_len, pos = self._decode_varint32(block, pos, restarts_offset)
+            except AssertionError as exc:
+                if restarts_offset - entry_start <= 2:
+                    break
+
+                raise AssertionError(
+                    "failed to decode SST {} entry header: "
+                    "entry_start={}, restarts_offset={}, error={}".format(
+                        block_name,
+                        entry_start,
+                        restarts_offset,
+                        exc,
+                    )
+                )
+
+            assert shared <= len(last_key), (
+                "invalid SST {} entry shared prefix: shared={}, last_key_len={}".format(
+                    block_name,
+                    shared,
+                    len(last_key),
+                )
+            )
+            assert pos + non_shared + value_len <= restarts_offset, (
+                "invalid SST {} entry: pos={}, shared={}, "
+                "non_shared={}, value_len={}, restarts_offset={}".format(
+                    block_name,
+                    pos,
+                    shared,
+                    non_shared,
+                    value_len,
+                    restarts_offset,
+                )
+            )
+
+            key_delta = block[pos:pos + non_shared]
+            pos += non_shared
+
+            value = block[pos:pos + value_len]
+            pos += value_len
+
+            key = last_key[:shared] + key_delta
+            entries.append((key, value))
+            last_key = key
+
+        return entries
+
+    def _decode_sst_filter_block_handle(self, data: bytes) -> Tuple[bytes, int, int]:
+        metaindex_offset, metaindex_size = self._decode_sst_footer_metaindex_handle(
+            data,
+        )
+        meta_entries = self._decode_sst_block_entries(
+            data,
+            metaindex_offset,
+            metaindex_size,
+            "metaindex",
+        )
+
+        filter_handles: List[Tuple[bytes, int, int]] = []
+
+        for key, value in meta_entries:
+            if b"filter" not in key.lower():
+                continue
+
+            try:
+                filter_offset, filter_size, pos = self._decode_sst_block_handle(
+                    value,
+                    0,
+                    len(value),
+                )
+            except AssertionError:
+                continue
+
+            if pos != len(value):
+                continue
+
+            try:
+                self._assert_sst_block_handle_in_file(
+                    data,
+                    filter_offset,
+                    filter_size,
+                    "filter block {!r}".format(key),
+                )
+            except AssertionError:
+                continue
+
+            filter_handles.append((key, filter_offset, filter_size))
+
+        assert filter_handles, (
+            "no filter block handle found in SST metaindex"
+        )
+
+        return sorted(filter_handles, key=lambda item: item[0])[0]
+
     def corrupt_sst_checksum_area(self, path: str) -> Tuple[int, int, int]:
         """
         解析 SST footer，找到 metaindex block，并翻转其 trailer 中的 checksum。
@@ -1600,6 +1746,72 @@ class RepairAT:
                 old_size,
                 block_offset,
                 block_size,
+                offset,
+                actual_len,
+            )
+        )
+
+        return old_size, offset, actual_len
+
+    def corrupt_sst_filter_block_area(self, path: str) -> Tuple[int, int, int]:
+        """
+        解析 SST metaindex，找到 filter block，并翻转该 block trailer 中的 checksum。
+
+        RocksDB block trailer 结构为：
+          1 byte compression type + 4 byte checksum
+        """
+        with open(path, "rb") as f:
+            data = f.read()
+
+        old_size = len(data)
+        filter_key, filter_offset, filter_size = self._decode_sst_filter_block_handle(
+            data,
+        )
+        offset = filter_offset + filter_size + 1
+        actual_len = 4
+
+        assert offset + actual_len <= old_size, (
+            "invalid SST filter block corruption range: "
+            "path={}, size={}, filter_key={!r}, filter_offset={}, "
+            "filter_size={}, offset={}, length={}".format(
+                path,
+                old_size,
+                filter_key,
+                filter_offset,
+                filter_size,
+                offset,
+                actual_len,
+            )
+        )
+
+        with open(path, "r+b") as f:
+            f.seek(offset)
+            checksum = f.read(actual_len)
+
+            assert len(checksum) == actual_len, (
+                "failed to read SST filter checksum bytes: "
+                "path={}, offset={}".format(
+                    path,
+                    offset,
+                )
+            )
+
+            bad = bytes(b ^ 0xff for b in checksum)
+
+            f.seek(offset)
+            f.write(bad)
+            f.flush()
+            os.fsync(f.fileno())
+
+        print(
+            "corrupted SST filter block area: "
+            "path={}, size={}, filter_key={!r}, filter_offset={}, "
+            "filter_size={}, offset={}, length={}".format(
+                path,
+                old_size,
+                filter_key,
+                filter_offset,
+                filter_size,
                 offset,
                 actual_len,
             )
