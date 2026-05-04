@@ -66,7 +66,7 @@ def test_s7_sst_magic_number_corrupted_and_repair():
 
         print("selected live SST file to corrupt magic number: {}".format(sst_file))
 
-        ctx.corrupt_sst_magic_number(sst_file)
+        ctx.corrupt_sst_tail(sst_file, length=8)
 
         ctx.start_shardsvr(target.shard_port)
 
