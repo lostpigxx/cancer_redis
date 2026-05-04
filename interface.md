@@ -1814,6 +1814,59 @@ RocksDB block trailer 结构：
 
 注意：checksum 损坏通常在 RocksDB Open 读取 table block 时暴露；如果当前 RocksDB 配置不会在 Open 阶段校验对应 block，该类用例可能无法进入 `corrupted`。
 
+### 11.7 `corrupt_sst_filter_block_area()`
+
+```python
+def corrupt_sst_filter_block_area(self, path: str) -> Tuple[int, int, int]
+```
+
+按 RocksDB 9.2.1 block-based table 格式解析 SST footer 和 metaindex，选择 metaindex 中 key 包含 `filter` 的 block handle，并翻转该 filter block trailer 中的 4 字节 checksum 区域。
+
+版本约束同 `corrupt_sst_checksum_area()`：
+
+- RocksDB 版本：`9.2.1`。
+- 仅支持 block-based table SST。
+- 通过 SST 末尾 magic number 判断 footer 类型，不做 48/53 字节长度猜测。
+- legacy block-based table magic 使用 legacy footer，metaindex handle 直接存于 footer。
+- 新版 block-based table magic 使用 53 字节 footer；读取 footer version。
+- footer version `<= 5` 时，metaindex handle 直接存于 footer。
+- footer version `>= 6` 时，footer 不保存 metaindex handle；从 footer 固定字段读取 `metaindex_size`，按 footer 前一段反推 metaindex block。
+
+RocksDB block trailer 结构：
+
+```text
+1 byte compression type + 4 byte checksum
+```
+
+| 参数 | 类型 | 含义 |
+|---|---:|---|
+| `path` | `str` | SST 文件路径。 |
+
+返回值：`Tuple[int, int, int]`。
+
+结构：
+
+```python
+(old_size, offset, actual_len)
+```
+
+| 返回元素 | 类型 | 含义 |
+|---|---:|---|
+| `old_size` | `int` | 覆盖前文件大小。 |
+| `offset` | `int` | filter block checksum 覆盖起始 offset。 |
+| `actual_len` | `int` | 实际覆盖长度，固定为 `4`。 |
+
+失败条件：
+
+- SST 文件过小，无法解析 RocksDB 9.2.1 footer。
+- SST 文件 magic number 不是 RocksDB 9.2.1 block-based table magic。
+- metaindex block 压缩类型不是 `0`，当前 helper 无法解析压缩后的 metaindex block。
+- metaindex 中找不到 key 包含 `filter` 的 block handle。
+- filter block handle 超出文件范围。
+- 计算出的 checksum offset 超出文件范围。
+
+注意：filter block 损坏通常依赖 RocksDB Open 或后续读取路径加载 filter block 时暴露；如果当前 RocksDB 配置不会在 Open 阶段校验该 block，该类用例可能无法进入 `corrupted`。
+
 ## 12. Repair 接口
 
 ### 12.1 `repair_partition()`
@@ -1917,7 +1970,7 @@ at.assert_values_missing_or_exact(expected)
 
 ### 13.3 SST 损坏类故障
 
-适用于删除 SST、截断 SST、损坏 SST tail、损坏 SST data block 区域、损坏 SST checksum 区域等场景。
+适用于删除 SST、截断 SST、损坏 SST tail、损坏 SST data block 区域、损坏 SST checksum 区域、损坏 SST filter block 区域等场景。
 
 ```python
 target = at.pick_target_partition()
@@ -1942,6 +1995,7 @@ at.zero_sst_file(sst)
 at.corrupt_sst_tail(sst)
 at.corrupt_sst_data_block_area(sst)
 at.corrupt_sst_checksum_area(sst)
+at.corrupt_sst_filter_block_area(sst)
 ```
 
 ## 14. 接口副作用与注意事项
@@ -1962,6 +2016,8 @@ at.corrupt_sst_checksum_area(sst)
 - `zero_sst_file()`
 - `corrupt_sst_tail()`
 - `corrupt_sst_data_block_area()`
+- `corrupt_sst_checksum_area()`
+- `corrupt_sst_filter_block_area()`
 
 这些接口应只在测试环境中使用。
 

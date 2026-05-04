@@ -1456,6 +1456,93 @@ class RepairAT:
             )
         )
 
+    def _decode_sst_footer_metaindex_handle(
+        self,
+        data: bytes,
+    ) -> Tuple[int, int]:
+        """
+        Decode the metaindex block handle using RocksDB 9.2.1 footer rules.
+        """
+        legacy_magic = 0xdb4775248b80fb57
+        block_based_magic = 0x88e241b785f4cff7
+        legacy_footer_size = 48
+        new_footer_size = 53
+        block_handle_area_size = 40
+        file_size = len(data)
+
+        assert file_size > legacy_footer_size, (
+            "SST file too small to decode RocksDB 9.2.1 footer: size={}".format(
+                file_size,
+            )
+        )
+
+        magic = int.from_bytes(data[-8:], byteorder="little")
+
+        if magic == legacy_magic:
+            footer_offset = file_size - legacy_footer_size
+            metaindex_offset, metaindex_size, _ = self._decode_sst_block_handle(
+                data,
+                footer_offset,
+                footer_offset + block_handle_area_size,
+            )
+            self._assert_sst_block_handle_in_file(
+                data,
+                metaindex_offset,
+                metaindex_size,
+                "legacy metaindex block",
+            )
+
+            return metaindex_offset, metaindex_size
+
+        assert magic == block_based_magic, (
+            "unsupported SST table magic number for RocksDB 9.2.1 "
+            "block-based table: magic=0x{:016x}".format(magic)
+        )
+
+        assert file_size > new_footer_size, (
+            "SST file too small to decode RocksDB 9.2.1 new footer: size={}".format(
+                file_size,
+            )
+        )
+
+        footer_offset = file_size - new_footer_size
+        footer_version_offset = footer_offset + 1 + block_handle_area_size
+        footer_version = int.from_bytes(
+            data[footer_version_offset:footer_version_offset + 4],
+            byteorder="little",
+        )
+
+        if footer_version <= 5:
+            metaindex_offset, metaindex_size, _ = self._decode_sst_block_handle(
+                data,
+                footer_offset + 1,
+                footer_offset + 1 + block_handle_area_size,
+            )
+            self._assert_sst_block_handle_in_file(
+                data,
+                metaindex_offset,
+                metaindex_size,
+                "metaindex block",
+            )
+
+            return metaindex_offset, metaindex_size
+
+        metaindex_size_offset = footer_offset + 13
+        metaindex_size = int.from_bytes(
+            data[metaindex_size_offset:metaindex_size_offset + 4],
+            byteorder="little",
+        )
+        metaindex_offset = footer_offset - metaindex_size - 5
+
+        self._assert_sst_block_handle_in_file(
+            data,
+            metaindex_offset,
+            metaindex_size,
+            "format_version>=6 metaindex block",
+        )
+
+        return metaindex_offset, metaindex_size
+
     def _decode_sst_footer_index_handle(
         self,
         data: bytes,
@@ -1644,9 +1731,25 @@ class RepairAT:
         pos = 0
 
         while pos < restarts_offset:
-            shared, pos = self._decode_varint32(block, pos, restarts_offset)
-            non_shared, pos = self._decode_varint32(block, pos, restarts_offset)
-            value_len, pos = self._decode_varint32(block, pos, restarts_offset)
+            entry_start = pos
+
+            try:
+                shared, pos = self._decode_varint32(block, pos, restarts_offset)
+                non_shared, pos = self._decode_varint32(block, pos, restarts_offset)
+                value_len, pos = self._decode_varint32(block, pos, restarts_offset)
+            except AssertionError as exc:
+                if restarts_offset - entry_start <= 2:
+                    break
+
+                raise AssertionError(
+                    "failed to decode SST {} entry header: "
+                    "entry_start={}, restarts_offset={}, error={}".format(
+                        block_name,
+                        entry_start,
+                        restarts_offset,
+                        exc,
+                    )
+                )
 
             assert shared <= len(last_key), (
                 "invalid SST {} entry shared prefix: shared={}, last_key_len={}".format(
@@ -1707,6 +1810,53 @@ class RepairAT:
                 handles.append((data_offset, data_size))
 
         return handles
+
+    def _decode_sst_filter_block_handle(self, data: bytes) -> Tuple[bytes, int, int]:
+        metaindex_offset, metaindex_size = self._decode_sst_footer_metaindex_handle(
+            data,
+        )
+        meta_entries = self._decode_sst_block_entries(
+            data,
+            metaindex_offset,
+            metaindex_size,
+            "metaindex",
+        )
+
+        filter_handles: List[Tuple[bytes, int, int]] = []
+
+        for key, value in meta_entries:
+            if b"filter" not in key.lower():
+                continue
+
+            try:
+                filter_offset, filter_size, pos = self._decode_sst_block_handle(
+                    value,
+                    0,
+                    len(value),
+                )
+            except AssertionError:
+                continue
+
+            if pos != len(value):
+                continue
+
+            try:
+                self._assert_sst_block_handle_in_file(
+                    data,
+                    filter_offset,
+                    filter_size,
+                    "filter block {!r}".format(key),
+                )
+            except AssertionError:
+                continue
+
+            filter_handles.append((key, filter_offset, filter_size))
+
+        assert filter_handles, (
+            "no filter block handle found in SST metaindex"
+        )
+
+        return sorted(filter_handles, key=lambda item: item[0])[0]
 
     def corrupt_sst_checksum_area(self, path: str) -> Tuple[int, int, int]:
         """
@@ -1773,6 +1923,72 @@ class RepairAT:
                 old_size,
                 data_offset,
                 data_size,
+                offset,
+                actual_len,
+            )
+        )
+
+        return old_size, offset, actual_len
+
+    def corrupt_sst_filter_block_area(self, path: str) -> Tuple[int, int, int]:
+        """
+        解析 SST metaindex，找到 filter block，并翻转该 block trailer 中的 checksum。
+
+        RocksDB block trailer 结构为：
+          1 byte compression type + 4 byte checksum
+        """
+        with open(path, "rb") as f:
+            data = f.read()
+
+        old_size = len(data)
+        filter_key, filter_offset, filter_size = self._decode_sst_filter_block_handle(
+            data,
+        )
+        offset = filter_offset + filter_size + 1
+        actual_len = 4
+
+        assert offset + actual_len <= old_size, (
+            "invalid SST filter block corruption range: "
+            "path={}, size={}, filter_key={!r}, filter_offset={}, "
+            "filter_size={}, offset={}, length={}".format(
+                path,
+                old_size,
+                filter_key,
+                filter_offset,
+                filter_size,
+                offset,
+                actual_len,
+            )
+        )
+
+        with open(path, "r+b") as f:
+            f.seek(offset)
+            checksum = f.read(actual_len)
+
+            assert len(checksum) == actual_len, (
+                "failed to read SST filter checksum bytes: "
+                "path={}, offset={}".format(
+                    path,
+                    offset,
+                )
+            )
+
+            bad = bytes(b ^ 0xff for b in checksum)
+
+            f.seek(offset)
+            f.write(bad)
+            f.flush()
+            os.fsync(f.fileno())
+
+        print(
+            "corrupted SST filter block area: "
+            "path={}, size={}, filter_key={!r}, filter_offset={}, "
+            "filter_size={}, offset={}, length={}".format(
+                path,
+                old_size,
+                filter_key,
+                filter_offset,
+                filter_size,
                 offset,
                 actual_len,
             )
