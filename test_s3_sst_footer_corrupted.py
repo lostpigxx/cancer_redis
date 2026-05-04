@@ -41,9 +41,7 @@ def test_s3_sst_footer_corrupted_and_repair():
         key_prefix="s3:target",
     )
 
-    sst_file = ctx.pick_largest_sst_from(new_ssts)
-
-    print("selected SST file to corrupt tail: {}".format(sst_file))
+    print("new SST files after target flush: {}".format(new_ssts))
 
     # ---------- T4：写入并落盘 guard 数据 ----------
 
@@ -60,6 +58,13 @@ def test_s3_sst_footer_corrupted_and_repair():
     with ctx.heartbeat_disabled():
         ctx.kill_shardsvr(target.shard_port)
         ctx.assert_pinned(target)
+
+        sst_file = ctx.pick_largest_live_sst(
+            target=target,
+            preferred_files=new_ssts,
+        )
+
+        print("selected live SST file to corrupt tail: {}".format(sst_file))
 
         ctx.corrupt_sst_tail(sst_file)
 

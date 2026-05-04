@@ -41,9 +41,7 @@ def test_s2_sst_file_truncated_and_repair():
         key_prefix="s2:target",
     )
 
-    sst_file = ctx.pick_largest_sst_from(new_ssts)
-
-    print("selected SST file to truncate: {}".format(sst_file))
+    print("new SST files after target flush: {}".format(new_ssts))
 
     # ---------- T4：写入并落盘 guard 数据 ----------
 
@@ -60,6 +58,13 @@ def test_s2_sst_file_truncated_and_repair():
     with ctx.heartbeat_disabled():
         ctx.kill_shardsvr(target.shard_port)
         ctx.assert_pinned(target)
+
+        sst_file = ctx.pick_largest_live_sst(
+            target=target,
+            preferred_files=new_ssts,
+        )
+
+        print("selected live SST file to truncate: {}".format(sst_file))
 
         ctx.truncate_sst_file_to_half(sst_file)
 
