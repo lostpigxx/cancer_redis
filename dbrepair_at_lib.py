@@ -1835,6 +1835,98 @@ class RepairAT:
 
         return sorted(filter_handles, key=lambda item: item[0])[0]
 
+    def _decode_sst_footer_index_handle(
+        self,
+        data: bytes,
+    ) -> Tuple[int, int]:
+        """
+        Decode the index block handle using RocksDB 9.2.1 footer rules.
+
+        Footer version <= 5 stores the index handle in the footer. Footer
+        version >= 6 stores it in metaindex under key "rocksdb.index".
+        """
+        legacy_magic = 0xdb4775248b80fb57
+        block_based_magic = 0x88e241b785f4cff7
+        legacy_footer_size = 48
+        new_footer_size = 53
+        block_handle_area_size = 40
+        file_size = len(data)
+
+        assert file_size > legacy_footer_size, (
+            "SST file too small to decode RocksDB 9.2.1 footer: size={}".format(
+                file_size,
+            )
+        )
+
+        magic = int.from_bytes(data[-8:], byteorder="little")
+
+        if magic == legacy_magic:
+            footer_offset = file_size - legacy_footer_size
+            _, _, pos = self._decode_sst_block_handle(
+                data,
+                footer_offset,
+                footer_offset + block_handle_area_size,
+            )
+            index_offset, index_size, _ = self._decode_sst_block_handle(
+                data,
+                pos,
+                footer_offset + block_handle_area_size,
+            )
+            self._assert_sst_block_handle_in_file(
+                data,
+                index_offset,
+                index_size,
+                "legacy index block",
+            )
+
+            return index_offset, index_size
+
+        assert magic == block_based_magic, (
+            "unsupported SST table magic number for RocksDB 9.2.1 "
+            "block-based table: magic=0x{:016x}".format(magic)
+        )
+
+        assert file_size > new_footer_size, (
+            "SST file too small to decode RocksDB 9.2.1 new footer: size={}".format(
+                file_size,
+            )
+        )
+
+        footer_offset = file_size - new_footer_size
+        footer_version_offset = footer_offset + 1 + block_handle_area_size
+        footer_version = int.from_bytes(
+            data[footer_version_offset:footer_version_offset + 4],
+            byteorder="little",
+        )
+
+        if footer_version <= 5:
+            _, _, pos = self._decode_sst_block_handle(
+                data,
+                footer_offset + 1,
+                footer_offset + 1 + block_handle_area_size,
+            )
+            index_offset, index_size, _ = self._decode_sst_block_handle(
+                data,
+                pos,
+                footer_offset + 1 + block_handle_area_size,
+            )
+            self._assert_sst_block_handle_in_file(
+                data,
+                index_offset,
+                index_size,
+                "index block",
+            )
+
+            return index_offset, index_size
+
+        _, index_offset, index_size = self._decode_sst_meta_block_handle(
+            data,
+            b"rocksdb.index",
+            "rocksdb.index",
+        )
+
+        return index_offset, index_size
+
     def corrupt_sst_index_block_area(self, path: str) -> Tuple[int, int, int]:
         """
         解析 SST footer，找到 index block，并翻转该 block trailer 中的 checksum。
