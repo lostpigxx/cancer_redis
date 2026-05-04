@@ -854,6 +854,19 @@ class RepairAT:
         manifest_name = self.read_current_manifest_name(target)
         return os.path.join(self.partition_db_dir(target), manifest_name)
 
+    def write_current_file_content(self, target: Partition, content: str) -> None:
+        """
+        精确覆盖目标 partition 的 CURRENT 内容。
+
+        不自动追加换行，供 CURRENT 解析严格性类用例使用。
+        """
+        path = self.current_file_path(target)
+
+        with open(path, "w") as f:
+            f.write(content)
+            f.flush()
+            os.fsync(f.fileno())
+
     def delete_file(self, path: str) -> None:
         assert os.path.exists(path), "file not found: {}".format(path)
         os.remove(path)

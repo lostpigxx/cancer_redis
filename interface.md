@@ -1194,7 +1194,24 @@ def current_manifest_path(self, target: Partition) -> str
 <partition_db_dir>/<manifest_name_from_CURRENT>
 ```
 
-### 8.5 `delete_file()`
+### 8.5 `write_current_file_content()`
+
+```python
+def write_current_file_content(self, target: Partition, content: str) -> None
+```
+
+精确覆盖目标 partition 的 `CURRENT` 文件内容，不自动追加换行。
+
+| 参数 | 类型 | 含义 |
+|---|---:|---|
+| `target` | `Partition` | 目标 partition。 |
+| `content` | `str` | 写入 `CURRENT` 的完整内容。 |
+
+返回值：`None`。
+
+用途：验证 `CURRENT` 为空、随机内容、缺少换行、包含多余空白、多行内容或半截 `MANIFEST-` 文件名等解析异常。
+
+### 8.6 `delete_file()`
 
 ```python
 def delete_file(self, path: str) -> None
@@ -1210,7 +1227,7 @@ def delete_file(self, path: str) -> None
 
 失败条件：文件不存在时抛出 `AssertionError`。
 
-### 8.6 `overwrite_file_middle()`
+### 8.7 `overwrite_file_middle()`
 
 ```python
 def overwrite_file_middle(self, path: str, length: int = 4096) -> Tuple[int, int, int]
@@ -1239,7 +1256,7 @@ def overwrite_file_middle(self, path: str, length: int = 4096) -> Tuple[int, int
 
 失败条件：文件大小不满足 `old_size > length * 2` 时抛出 `AssertionError`。
 
-### 8.7 `break_current_to_missing_manifest()`
+### 8.8 `break_current_to_missing_manifest()`
 
 ```python
 def break_current_to_missing_manifest(
@@ -1260,7 +1277,7 @@ def break_current_to_missing_manifest(
 
 用途：稳定制造 RocksDB Open 失败。
 
-### 8.8 `delete_current_file()`
+### 8.9 `delete_current_file()`
 
 ```python
 def delete_current_file(self, target: Partition) -> None
@@ -1276,7 +1293,7 @@ def delete_current_file(self, target: Partition) -> None
 
 失败条件：`CURRENT` 不存在时抛出 `AssertionError`。
 
-### 8.9 `delete_current_manifest_file()`
+### 8.10 `delete_current_manifest_file()`
 
 ```python
 def delete_current_manifest_file(self, target: Partition) -> None
