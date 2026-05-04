@@ -1218,6 +1218,46 @@ class RepairAT:
 
         return old_size, new_size
 
+    def zero_sst_file(self, path: str) -> int:
+        """
+        将 SST 文件内容清零，保留文件名和文件大小。
+        """
+        old_size = os.path.getsize(path)
+
+        assert old_size > 0, "SST file is empty: {}".format(path)
+
+        chunk = b"\x00" * 1024 * 1024
+        remaining = old_size
+
+        with open(path, "r+b") as f:
+            f.seek(0)
+
+            while remaining > 0:
+                write_len = min(len(chunk), remaining)
+                f.write(chunk[:write_len])
+                remaining -= write_len
+
+            f.flush()
+            os.fsync(f.fileno())
+
+        new_size = os.path.getsize(path)
+        assert new_size == old_size, (
+            "SST file size changed after zeroing: path={}, old_size={}, new_size={}".format(
+                path,
+                old_size,
+                new_size,
+            )
+        )
+
+        print(
+            "zeroed SST file: path={}, size={}".format(
+                path,
+                old_size,
+            )
+        )
+
+        return old_size
+
     def corrupt_sst_tail(
         self,
         path: str,

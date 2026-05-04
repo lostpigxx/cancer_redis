@@ -1657,7 +1657,26 @@ def truncate_sst_file_to_half(self, path: str) -> Tuple[int, int]
 
 失败条件：`old_size <= 4096` 时抛出 `AssertionError`。
 
-### 11.3 `corrupt_sst_tail()`
+### 11.3 `zero_sst_file()`
+
+```python
+def zero_sst_file(self, path: str) -> int
+```
+
+把指定 SST 文件内容全部写成 `0x00`，保留文件名和文件大小。
+
+| 参数 | 类型 | 含义 |
+|---|---:|---|
+| `path` | `str` | SST 文件路径。 |
+
+返回值：`int`，清零前文件大小。
+
+失败条件：
+
+- 文件大小为 `0` 时抛出 `AssertionError`。
+- 清零后文件大小发生变化时抛出 `AssertionError`。
+
+### 11.4 `corrupt_sst_tail()`
 
 ```python
 def corrupt_sst_tail(
@@ -1696,7 +1715,7 @@ actual_len = min(length, old_size // 4)
 
 失败条件：`old_size <= length * 2` 时抛出 `AssertionError`。
 
-### 11.4 `corrupt_sst_data_block_area()`
+### 11.5 `corrupt_sst_data_block_area()`
 
 ```python
 def corrupt_sst_data_block_area(
@@ -1866,6 +1885,7 @@ at.repair_and_wait_opened(target)
 
 ```python
 at.delete_sst_file(sst)
+at.zero_sst_file(sst)
 at.corrupt_sst_tail(sst)
 at.corrupt_sst_data_block_area(sst)
 ```
@@ -1885,6 +1905,7 @@ at.corrupt_sst_data_block_area(sst)
 - `_inject_middle_loss_to_wal_file()`
 - `delete_sst_file()`
 - `truncate_sst_file_to_half()`
+- `zero_sst_file()`
 - `corrupt_sst_tail()`
 - `corrupt_sst_data_block_area()`
 
