@@ -1485,72 +1485,184 @@ class RepairAT:
 
         return block_offset, block_size, pos
 
-    def _decode_legacy_sst_index_handle(
+    def _assert_sst_block_handle_in_file(
+        self,
+        data: bytes,
+        block_offset: int,
+        block_size: int,
+        handle_name: str,
+    ) -> None:
+        file_size = len(data)
+
+        assert block_size > 0, (
+            "invalid SST {} handle: offset={}, size={}".format(
+                handle_name,
+                block_offset,
+                block_size,
+            )
+        )
+        assert block_offset + block_size + 5 <= file_size, (
+            "SST {} handle points outside file: "
+            "file_size={}, offset={}, size={}".format(
+                handle_name,
+                file_size,
+                block_offset,
+                block_size,
+            )
+        )
+
+    def _decode_sst_footer_index_handle(
         self,
         data: bytes,
     ) -> Tuple[int, int]:
-        footer_size = 48
-        handle_area_size = 40
+        """
+        Decode the index block handle using RocksDB 9.2.1 footer rules.
+
+        Footer version <= 5 stores the index handle in the footer. Footer
+        version >= 6 stores it in metaindex under key "rocksdb.index".
+        """
+        legacy_magic = 0xdb4775248b80fb57
+        block_based_magic = 0x88e241b785f4cff7
+        legacy_footer_size = 48
+        new_footer_size = 53
+        block_handle_area_size = 40
         file_size = len(data)
 
-        assert file_size > footer_size, (
-            "SST file too small to decode legacy footer: size={}".format(
+        assert file_size > legacy_footer_size, (
+            "SST file too small to decode RocksDB 9.2.1 footer: size={}".format(
                 file_size,
             )
         )
 
-        footer_offset = file_size - footer_size
-        _, _, pos = self._decode_sst_block_handle(
-            data,
-            footer_offset,
-            footer_offset + handle_area_size,
-        )
-        index_offset, index_size, _ = self._decode_sst_block_handle(
-            data,
-            pos,
-            footer_offset + handle_area_size,
-        )
+        magic = int.from_bytes(data[-8:], byteorder="little")
 
-        assert index_size > 0, (
-            "invalid SST index handle: offset={}, size={}".format(
+        if magic == legacy_magic:
+            footer_offset = file_size - legacy_footer_size
+            _, _, pos = self._decode_sst_block_handle(
+                data,
+                footer_offset,
+                footer_offset + block_handle_area_size,
+            )
+            index_offset, index_size, _ = self._decode_sst_block_handle(
+                data,
+                pos,
+                footer_offset + block_handle_area_size,
+            )
+            self._assert_sst_block_handle_in_file(
+                data,
                 index_offset,
                 index_size,
+                "legacy index block",
             )
+
+            return index_offset, index_size
+
+        assert magic == block_based_magic, (
+            "unsupported SST table magic number for RocksDB 9.2.1 "
+            "block-based table: magic=0x{:016x}".format(magic)
         )
-        assert index_offset + index_size + 5 <= file_size, (
-            "SST index handle points outside file: "
-            "file_size={}, index_offset={}, index_size={}".format(
+
+        assert file_size > new_footer_size, (
+            "SST file too small to decode RocksDB 9.2.1 new footer: size={}".format(
                 file_size,
-                index_offset,
-                index_size,
             )
         )
 
-        return index_offset, index_size
+        footer_offset = file_size - new_footer_size
+        footer_version_offset = footer_offset + 1 + block_handle_area_size
+        footer_version = int.from_bytes(
+            data[footer_version_offset:footer_version_offset + 4],
+            byteorder="little",
+        )
 
-    def _decode_sst_index_block_handles(
+        metaindex_offset, metaindex_size, pos = self._decode_sst_block_handle(
+            data,
+            footer_offset + 1,
+            footer_offset + 1 + block_handle_area_size,
+        )
+        self._assert_sst_block_handle_in_file(
+            data,
+            metaindex_offset,
+            metaindex_size,
+            "metaindex block",
+        )
+
+        if footer_version <= 5:
+            index_offset, index_size, _ = self._decode_sst_block_handle(
+                data,
+                pos,
+                footer_offset + 1 + block_handle_area_size,
+            )
+            self._assert_sst_block_handle_in_file(
+                data,
+                index_offset,
+                index_size,
+                "index block",
+            )
+
+            return index_offset, index_size
+
+        meta_entries = self._decode_sst_block_entries(
+            data,
+            metaindex_offset,
+            metaindex_size,
+            "metaindex",
+        )
+
+        for key, value in meta_entries:
+            if key == b"rocksdb.index":
+                index_offset, index_size, pos = self._decode_sst_block_handle(
+                    value,
+                    0,
+                    len(value),
+                )
+                assert pos == len(value), (
+                    "invalid rocksdb.index metaindex value length: "
+                    "value_len={}, decoded_pos={}".format(
+                        len(value),
+                        pos,
+                    )
+                )
+                self._assert_sst_block_handle_in_file(
+                    data,
+                    index_offset,
+                    index_size,
+                    "rocksdb.index block",
+                )
+
+                return index_offset, index_size
+
+        raise AssertionError(
+            "RocksDB 9.2.1 footer_version={} stores index handle in metaindex, "
+            "but rocksdb.index entry was not found".format(footer_version)
+        )
+
+    def _decode_sst_block_entries(
         self,
         data: bytes,
-        index_offset: int,
-        index_size: int,
-    ) -> List[Tuple[int, int]]:
-        block_end = index_offset + index_size
+        block_offset: int,
+        block_size: int,
+        block_name: str,
+    ) -> List[Tuple[bytes, bytes]]:
+        block_end = block_offset + block_size
         compression_type = data[block_end]
 
         assert compression_type == 0, (
-            "SST index block is compressed or uses unsupported compression: "
-            "index_offset={}, index_size={}, compression_type={}".format(
-                index_offset,
-                index_size,
+            "SST {} block is compressed or uses unsupported compression: "
+            "offset={}, size={}, compression_type={}".format(
+                block_name,
+                block_offset,
+                block_size,
                 compression_type,
             )
         )
 
-        block = data[index_offset:block_end]
+        block = data[block_offset:block_end]
         assert len(block) >= 8, (
-            "SST index block too small: index_offset={}, index_size={}".format(
-                index_offset,
-                index_size,
+            "SST {} block too small: offset={}, size={}".format(
+                block_name,
+                block_offset,
+                block_size,
             )
         )
 
@@ -1559,15 +1671,17 @@ class RepairAT:
         restarts_offset = len(block) - 4 - restarts_size
 
         assert restart_count > 0 and restarts_offset > 0, (
-            "invalid SST index restart array: "
-            "index_offset={}, index_size={}, restart_count={}".format(
-                index_offset,
-                index_size,
+            "invalid SST {} restart array: "
+            "offset={}, size={}, restart_count={}".format(
+                block_name,
+                block_offset,
+                block_size,
                 restart_count,
             )
         )
 
-        handles: List[Tuple[int, int]] = []
+        entries: List[Tuple[bytes, bytes]] = []
+        last_key = b""
         pos = 0
 
         while pos < restarts_offset:
@@ -1575,9 +1689,17 @@ class RepairAT:
             non_shared, pos = self._decode_varint32(block, pos, restarts_offset)
             value_len, pos = self._decode_varint32(block, pos, restarts_offset)
 
+            assert shared <= len(last_key), (
+                "invalid SST {} entry shared prefix: shared={}, last_key_len={}".format(
+                    block_name,
+                    shared,
+                    len(last_key),
+                )
+            )
             assert pos + non_shared + value_len <= restarts_offset, (
-                "invalid SST index entry: pos={}, shared={}, "
+                "invalid SST {} entry: pos={}, shared={}, "
                 "non_shared={}, value_len={}, restarts_offset={}".format(
+                    block_name,
                     pos,
                     shared,
                     non_shared,
@@ -1586,23 +1708,44 @@ class RepairAT:
                 )
             )
 
+            key_delta = block[pos:pos + non_shared]
             pos += non_shared
-            value_start = pos
-            value_end = pos + value_len
 
+            value = block[pos:pos + value_len]
+            pos += value_len
+
+            key = last_key[:shared] + key_delta
+            entries.append((key, value))
+            last_key = key
+
+        return entries
+
+    def _decode_sst_index_block_handles(
+        self,
+        data: bytes,
+        index_offset: int,
+        index_size: int,
+    ) -> List[Tuple[int, int]]:
+        entries = self._decode_sst_block_entries(
+            data,
+            index_offset,
+            index_size,
+            "index",
+        )
+        handles: List[Tuple[int, int]] = []
+
+        for _, value in entries:
             try:
-                data_offset, data_size, data_pos = self._decode_sst_block_handle(
-                    block,
-                    value_start,
-                    value_end,
+                data_offset, data_size, _ = self._decode_sst_block_handle(
+                    value,
+                    0,
+                    len(value),
                 )
-
-                if data_pos == value_end and data_offset + data_size + 5 <= len(data):
-                    handles.append((data_offset, data_size))
             except AssertionError:
-                pass
+                continue
 
-            pos = value_end
+            if data_offset + data_size + 5 <= len(data):
+                handles.append((data_offset, data_size))
 
         return handles
 
@@ -1617,7 +1760,7 @@ class RepairAT:
             data = f.read()
 
         old_size = len(data)
-        index_offset, index_size = self._decode_legacy_sst_index_handle(data)
+        index_offset, index_size = self._decode_sst_footer_index_handle(data)
         data_handles = self._decode_sst_index_block_handles(
             data,
             index_offset,
