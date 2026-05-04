@@ -58,6 +58,10 @@ def test_m2_current_points_to_missing_manifest_and_repair():
         value="after-repair-value",
     )
 
+    ctx.assert_all_partitions_read_write(
+        prefix="test_m2_current_points_to_missing_manifest:after-repair:all-partitions",
+    )
+
     ctx.assert_all_partitions_opened()
 
 

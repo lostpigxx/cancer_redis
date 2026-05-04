@@ -855,7 +855,36 @@ def write_guard_strings(
 
 用途：repair 后用 `assert_values_exact()` 检查非目标 partition 的 guard 数据仍然完整。
 
-### 6.8 `assert_values_exact()`
+### 6.8 `assert_all_partitions_read_write()`
+
+```python
+def assert_all_partitions_read_write(
+    self,
+    prefix: str,
+    complex_count: int = 1,
+) -> None
+```
+
+对每个 partition 通过 proxy 写入并读取 string / hash / set / zset / list 数据。
+
+| 参数 | 类型 | 含义 |
+|---|---:|---|
+| `prefix` | `str` | 本次探针使用的 key 前缀，建议每个用例唯一。 |
+| `complex_count` | `int` | 每个 partition 每种复合类型写入的 key 数量，默认 `1`。 |
+
+内部行为：
+
+1. 调用 `assert_all_partitions_opened()` 确认所有 partition 已恢复 opened。
+2. 遍历 `chunksmap()` 中的每个 partition。
+3. 对每个 partition 调用 `hashtag_for(partition, prefix=...)` 构造专属 hashtag。
+4. 写入一个 string key，并用 `assert_key_routes_to_partition()` 确认路由落入该 partition。
+5. 调用 `write_complex_values()` 写入 hash / set / zset / list，并逐个确认 key 路由。
+6. 用 `assert_values_exact()` 和 `assert_complex_values_exact()` 强读取校验。
+7. 再次调用 `assert_all_partitions_opened()` 确认读写探针没有改变 partition 状态。
+
+用途：repair 完成后的最终全局探针，验证目标 partition 和所有非目标 partition 都能继续通过 proxy 正常读写，同时覆盖复合数据类型。
+
+### 6.9 `assert_values_exact()`
 
 ```python
 def assert_values_exact(self, expected: Dict[str, str]) -> None
@@ -871,7 +900,7 @@ def assert_values_exact(self, expected: Dict[str, str]) -> None
 
 失败条件：任一 key 不存在，或 value 不等于期望值时抛出 `AssertionError`。
 
-### 6.9 `assert_values_missing_or_exact()`
+### 6.10 `assert_values_missing_or_exact()`
 
 ```python
 def assert_values_missing_or_exact(self, expected: Dict[str, str]) -> None
@@ -891,7 +920,7 @@ def assert_values_missing_or_exact(self, expected: Dict[str, str]) -> None
 
 失败条件：任一存在的 key 对应 value 不等于期望值时抛出 `AssertionError`。
 
-### 6.10 `write_complex_values()`
+### 6.11 `write_complex_values()`
 
 ```python
 def write_complex_values(
@@ -923,7 +952,7 @@ def write_complex_values(
 
 用途：覆盖复合类型可能跨 column family 存放 metadata 和 data 的场景。
 
-### 6.11 `assert_complex_values_exact()`
+### 6.12 `assert_complex_values_exact()`
 
 ```python
 def assert_complex_values_exact(
@@ -934,7 +963,7 @@ def assert_complex_values_exact(
 
 强校验复合类型数据：key 必须存在，Redis type 必须正确，内容必须完整一致。
 
-### 6.12 `assert_complex_values_missing_or_exact()`
+### 6.13 `assert_complex_values_missing_or_exact()`
 
 ```python
 def assert_complex_values_missing_or_exact(

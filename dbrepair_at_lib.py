@@ -459,6 +459,66 @@ class RepairAT:
 
         return expected
 
+    def assert_all_partitions_read_write(
+        self,
+        prefix: str,
+        complex_count: int = 1,
+    ) -> None:
+        """
+        对每个 partition 通过 proxy 写入并读取 string 和复合类型数据。
+
+        用途：
+          repair 完成后验证所有 partition 都处于 opened 且可正常读写。
+          每个 partition 都单独构造 hashtag，并校验写入 key 的路由范围。
+        """
+        self.assert_all_partitions_opened()
+
+        partitions = self.chunksmap()
+        assert len(partitions) == test_env.EXPECTED_PARTITION_COUNT, (
+            "unexpected chunksmap partition count: actual={}, expected={}".format(
+                len(partitions),
+                test_env.EXPECTED_PARTITION_COUNT,
+            )
+        )
+
+        string_expected: Dict[str, str] = {}
+        complex_expected: Dict[str, Tuple[str, Any]] = {}
+
+        for p in partitions:
+            tag = self.hashtag_for(
+                partition=p,
+                prefix="{}:{}".format(prefix, p.partition_id),
+            )
+
+            string_key = "{}:string:{}:{}".format(
+                prefix,
+                p.partition_id,
+                tag,
+            )
+            string_value = "rw-value:{}:{}".format(
+                p.partition_id,
+                p.shard_port,
+            )
+
+            assert self.proxy.set(string_key, string_value) is True
+            self.assert_key_routes_to_partition(string_key, p)
+            string_expected[string_key] = string_value
+
+            partition_complex = self.write_complex_values(
+                tag=tag,
+                key_prefix="{}:complex:{}".format(prefix, p.partition_id),
+                count=complex_count,
+            )
+
+            for key in partition_complex:
+                self.assert_key_routes_to_partition(key, p)
+
+            complex_expected.update(partition_complex)
+
+        self.assert_values_exact(string_expected)
+        self.assert_complex_values_exact(complex_expected)
+        self.assert_all_partitions_opened()
+
     def assert_values_exact(self, expected: Dict[str, str]) -> None:
         """
         强校验：

@@ -112,6 +112,10 @@ def test_s12_sst_file_replaced_by_directory_and_repair():
             value="after-repair-value",
         )
 
+        ctx.assert_all_partitions_read_write(
+            prefix="test_s12_sst_file_replaced_by_directory:after-repair:all-partitions",
+        )
+
         ctx.assert_all_partitions_opened()
     finally:
         if sst_file is not None:

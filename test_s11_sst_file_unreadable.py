@@ -130,6 +130,10 @@ def test_s11_sst_file_unreadable_and_repair():
             value="after-repair-value",
         )
 
+        ctx.assert_all_partitions_read_write(
+            prefix="test_s11_sst_file_unreadable:after-repair:all-partitions",
+        )
+
         ctx.assert_all_partitions_opened()
     finally:
         if sst_file is not None and old_mode is not None and os.path.isfile(sst_file):

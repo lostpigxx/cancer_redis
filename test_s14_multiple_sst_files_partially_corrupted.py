@@ -147,6 +147,10 @@ def test_s14_multiple_sst_files_partially_corrupted_and_repair():
         value="after-repair-value",
     )
 
+    ctx.assert_all_partitions_read_write(
+        prefix="test_s14_multiple_sst_files_partially_corrupted:after-repair:all-partitions",
+    )
+
     ctx.assert_all_partitions_opened()
 
 

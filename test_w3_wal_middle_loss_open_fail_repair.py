@@ -147,6 +147,10 @@ def test_w3_wal_middle_loss_open_fail_and_repair():
 
     # ---------- T15：最终确认所有 partition opened ----------
 
+    ctx.assert_all_partitions_read_write(
+        prefix="test_w3_wal_middle_loss_open_fail_repair:after-repair:all-partitions",
+    )
+
     ctx.assert_all_partitions_opened()
 
 

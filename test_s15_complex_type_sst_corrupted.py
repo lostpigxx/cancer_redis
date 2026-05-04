@@ -147,6 +147,10 @@ def test_s15_complex_type_sst_corrupted_and_repair():
         value="after-repair-value",
     )
 
+    ctx.assert_all_partitions_read_write(
+        prefix="test_s15_complex_type_sst_corrupted:after-repair:all-partitions",
+    )
+
     ctx.assert_all_partitions_opened()
 
 

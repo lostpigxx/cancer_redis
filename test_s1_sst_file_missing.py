@@ -113,6 +113,10 @@ def test_s1_sst_file_missing_and_repair():
         value="after-repair-value",
     )
 
+    ctx.assert_all_partitions_read_write(
+        prefix="test_s1_sst_file_missing:after-repair:all-partitions",
+    )
+
     ctx.assert_all_partitions_opened()
 
 

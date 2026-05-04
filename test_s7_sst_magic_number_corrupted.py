@@ -113,6 +113,10 @@ def test_s7_sst_magic_number_corrupted_and_repair():
         value="after-repair-value",
     )
 
+    ctx.assert_all_partitions_read_write(
+        prefix="test_s7_sst_magic_number_corrupted:after-repair:all-partitions",
+    )
+
     ctx.assert_all_partitions_opened()
 
 
