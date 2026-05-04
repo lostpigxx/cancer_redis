@@ -4,11 +4,12 @@ import glob
 import os
 import re
 import signal
+import stat
 import subprocess
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Set, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 import redis
 
@@ -509,6 +510,163 @@ class RepairAT:
             )
         )
 
+    def write_complex_values(
+        self,
+        tag: str,
+        key_prefix: str,
+        count: int = 16,
+    ) -> Dict[str, Tuple[str, Any]]:
+        """
+        通过 proxy 写入 hash / set / zset / list 复合类型数据。
+
+        返回：
+          key -> (redis_type, expected_value)
+        """
+        expected: Dict[str, Tuple[str, Any]] = {}
+
+        for i in range(count):
+            hash_key = "{}:hash:{}:{}".format(key_prefix, i, tag)
+            self.proxy.delete(hash_key)
+            hash_value = {
+                "field:a": "hash-value:{}:a".format(i),
+                "field:b": "hash-value:{}:b".format(i),
+                "field:c": "hash-value:{}:c".format(i),
+            }
+            assert self.proxy.hset(hash_key, mapping=hash_value) >= 1
+            expected[hash_key] = ("hash", hash_value)
+
+            set_key = "{}:set:{}:{}".format(key_prefix, i, tag)
+            self.proxy.delete(set_key)
+            set_value = {
+                "set-value:{}:a".format(i),
+                "set-value:{}:b".format(i),
+                "set-value:{}:c".format(i),
+            }
+            assert self.proxy.sadd(set_key, *sorted(set_value)) >= 1
+            expected[set_key] = ("set", set_value)
+
+            zset_key = "{}:zset:{}:{}".format(key_prefix, i, tag)
+            self.proxy.delete(zset_key)
+            zset_value = [
+                ("zset-value:{}:a".format(i), float(i * 10 + 1)),
+                ("zset-value:{}:b".format(i), float(i * 10 + 2)),
+                ("zset-value:{}:c".format(i), float(i * 10 + 3)),
+            ]
+            assert self.proxy.zadd(
+                zset_key,
+                {member: score for member, score in zset_value},
+            ) >= 1
+            expected[zset_key] = ("zset", zset_value)
+
+            list_key = "{}:list:{}:{}".format(key_prefix, i, tag)
+            self.proxy.delete(list_key)
+            list_value = [
+                "list-value:{}:a".format(i),
+                "list-value:{}:b".format(i),
+                "list-value:{}:c".format(i),
+            ]
+            assert self.proxy.rpush(list_key, *list_value) == len(list_value)
+            expected[list_key] = ("list", list_value)
+
+        return expected
+
+    def assert_complex_values_exact(
+        self,
+        expected: Dict[str, Tuple[str, Any]],
+    ) -> None:
+        """
+        强校验复合类型数据：
+          key 必须存在，type 必须正确，内容必须完整一致。
+        """
+        for key, (redis_type, expected_value) in expected.items():
+            self._assert_complex_value(
+                key=key,
+                redis_type=redis_type,
+                expected_value=expected_value,
+                allow_missing=False,
+            )
+
+    def assert_complex_values_missing_or_exact(
+        self,
+        expected: Dict[str, Tuple[str, Any]],
+    ) -> None:
+        """
+        弱校验复合类型数据：
+          key 可以不存在；
+          但如果存在，type 和完整内容必须正确。
+        """
+        kept = 0
+        lost = 0
+
+        for key, (redis_type, expected_value) in expected.items():
+            if self.proxy.exists(key) == 0:
+                lost += 1
+                continue
+
+            self._assert_complex_value(
+                key=key,
+                redis_type=redis_type,
+                expected_value=expected_value,
+                allow_missing=False,
+            )
+            kept += 1
+
+        print(
+            "complex values missing-or-exact result: kept={}, lost={}, total={}".format(
+                kept,
+                lost,
+                len(expected),
+            )
+        )
+
+    def _assert_complex_value(
+        self,
+        key: str,
+        redis_type: str,
+        expected_value: Any,
+        allow_missing: bool,
+    ) -> None:
+        actual_type = self.proxy.type(key)
+
+        if actual_type == "none" and allow_missing:
+            return
+
+        assert actual_type == redis_type, (
+            "redis type mismatch: key={}, expected={}, actual={}".format(
+                key,
+                redis_type,
+                actual_type,
+            )
+        )
+
+        if redis_type == "hash":
+            actual = self.proxy.hgetall(key)
+        elif redis_type == "set":
+            actual = self.proxy.smembers(key)
+        elif redis_type == "zset":
+            actual = [
+                (member, float(score))
+                for member, score in self.proxy.zrange(
+                    key,
+                    0,
+                    -1,
+                    withscores=True,
+                )
+            ]
+        elif redis_type == "list":
+            actual = self.proxy.lrange(key, 0, -1)
+        else:
+            raise AssertionError("unsupported redis type: {}".format(redis_type))
+
+        assert actual == expected_value, (
+            "complex value mismatch: key={}, type={}, expected={!r}, actual={!r}".format(
+                key,
+                redis_type,
+                expected_value,
+                actual,
+            )
+        )
+
     # ----------------------------------------------------------------------
     # shardsvr 进程控制
     # ----------------------------------------------------------------------
@@ -985,7 +1143,7 @@ class RepairAT:
         files.extend(glob.glob(os.path.join(db_dir, "*.sst")))
         files.extend(glob.glob(os.path.join(db_dir, "*.ldb")))
 
-        return sorted(files)
+        return sorted(p for p in files if os.path.isfile(p))
 
     def sst_snapshot(self, target: Partition) -> Dict[str, Tuple[int, float]]:
         """
@@ -1111,7 +1269,7 @@ class RepairAT:
 
         live_files = [
             p for p in sst_files
-            if os.path.exists(p)
+            if os.path.isfile(p)
         ]
 
         assert live_files, (
@@ -1152,7 +1310,7 @@ class RepairAT:
         if preferred_files:
             live_preferred = [
                 p for p in preferred_files
-                if os.path.exists(p) and os.path.getsize(p) >= min_size
+                if os.path.isfile(p) and os.path.getsize(p) >= min_size
             ]
 
             if live_preferred:
@@ -1160,7 +1318,7 @@ class RepairAT:
 
         live_all = [
             p for p in self.sst_files(target)
-            if os.path.exists(p) and os.path.getsize(p) >= min_size
+            if os.path.isfile(p) and os.path.getsize(p) >= min_size
         ]
 
         assert live_all, (
@@ -1175,6 +1333,64 @@ class RepairAT:
 
         return max(live_all, key=os.path.getsize)
 
+    def pick_largest_live_ssts(
+        self,
+        target: Partition,
+        preferred_files: Optional[List[str]] = None,
+        count: int = 2,
+        min_size: int = 1,
+    ) -> List[str]:
+        """
+        选择目标 partition 当前仍然存在的多个 live SST 文件。
+
+        preferred_files 会优先参与选择；不足 count 时再从当前目录所有
+        live SST 中补齐。返回按文件大小从大到小排序。
+        """
+        assert count > 0, "count must be positive"
+
+        candidates: List[str] = []
+        seen = set()
+
+        def add_candidate(path: str) -> None:
+            if path in seen:
+                return
+
+            seen.add(path)
+
+            if not os.path.isfile(path):
+                return
+
+            if os.path.getsize(path) < min_size:
+                return
+
+            candidates.append(path)
+
+        if preferred_files:
+            for path in preferred_files:
+                add_candidate(path)
+
+        for path in self.sst_files(target):
+            add_candidate(path)
+
+        candidates = sorted(
+            candidates,
+            key=os.path.getsize,
+            reverse=True,
+        )
+
+        assert len(candidates) >= count, (
+            "not enough live SST files for partition={}, count={}, min_size={}. "
+            "preferred_files={}, candidates={}".format(
+                target.partition_id,
+                count,
+                min_size,
+                preferred_files,
+                [(p, os.path.getsize(p)) for p in candidates],
+            )
+        )
+
+        return candidates[:count]
+
     # ----------------------------------------------------------------------
     # SST 故障注入
     # ----------------------------------------------------------------------
@@ -1183,10 +1399,64 @@ class RepairAT:
         """
         删除 SST 文件。
         """
-        assert os.path.exists(path), "SST file not found: {}".format(path)
+        assert os.path.isfile(path), "SST file not found: {}".format(path)
 
         os.remove(path)
         print("deleted SST file: {}".format(path))
+
+    def chmod_sst_file(self, path: str, mode: int) -> int:
+        """
+        修改 SST 文件权限，返回修改前的 permission bits。
+        """
+        assert os.path.isfile(path), "SST file not found: {}".format(path)
+
+        old_mode = stat.S_IMODE(os.stat(path).st_mode)
+        os.chmod(path, mode)
+
+        print(
+            "chmod SST file: path={}, old_mode={:o}, new_mode={:o}".format(
+                path,
+                old_mode,
+                mode,
+            )
+        )
+
+        return old_mode
+
+    def replace_sst_file_with_directory(self, path: str) -> int:
+        """
+        删除 SST 文件，并在原路径创建同名目录。
+        """
+        assert os.path.isfile(path), "SST file not found: {}".format(path)
+
+        old_size = os.path.getsize(path)
+        os.remove(path)
+        os.mkdir(path)
+
+        print(
+            "replaced SST file with directory: path={}, old_size={}".format(
+                path,
+                old_size,
+            )
+        )
+
+        return old_size
+
+    def remove_sst_directory_replacement(self, path: str) -> None:
+        """
+        清理 replace_sst_file_with_directory() 产生的空目录。
+        """
+        if os.path.isdir(path) and not os.path.islink(path):
+            try:
+                os.rmdir(path)
+                print("removed SST directory replacement: {}".format(path))
+            except OSError as exc:
+                print(
+                    "failed to remove SST directory replacement: path={}, error={}".format(
+                        path,
+                        exc,
+                    )
+                )
 
     def truncate_sst_file_to_half(self, path: str) -> Tuple[int, int]:
         """

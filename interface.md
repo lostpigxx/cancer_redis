@@ -10,6 +10,7 @@
 - 查询和解析 partition 路由、owner、状态。
 - 构造落入指定 partition 的 hashtag。
 - 写入测试 string key，并校验 repair 前后的数据一致性。
+- 写入 hash / set / zset / list 复合类型数据，并校验 repair 后不存在半残或错误值。
 - 控制 shardsvr 进程停止和重启。
 - 定位 partition 对应的 RocksDB 目录。
 - 注入 CURRENT、MANIFEST、WAL、SST 文件级故障。
@@ -890,6 +891,62 @@ def assert_values_missing_or_exact(self, expected: Dict[str, str]) -> None
 
 失败条件：任一存在的 key 对应 value 不等于期望值时抛出 `AssertionError`。
 
+### 6.10 `write_complex_values()`
+
+```python
+def write_complex_values(
+    self,
+    tag: str,
+    key_prefix: str,
+    count: int = 16,
+) -> Dict[str, Tuple[str, Any]]
+```
+
+通过 proxy 写入 hash / set / zset / list 复合类型数据。
+
+| 参数 | 类型 | 含义 |
+|---|---:|---|
+| `tag` | `str` | hashtag，建议来自 `hashtag_for()`。 |
+| `key_prefix` | `str` | key 前缀。 |
+| `count` | `int` | 每种类型写入的 key 数量。默认 `16`。 |
+
+返回值：`Dict[str, Tuple[str, Any]]`，结构为：
+
+```python
+{
+    "<key>": ("hash", {"field": "value"}),
+    "<key>": ("set", {"member"}),
+    "<key>": ("zset", [("member", 1.0)]),
+    "<key>": ("list", ["value"]),
+}
+```
+
+用途：覆盖复合类型可能跨 column family 存放 metadata 和 data 的场景。
+
+### 6.11 `assert_complex_values_exact()`
+
+```python
+def assert_complex_values_exact(
+    self,
+    expected: Dict[str, Tuple[str, Any]],
+) -> None
+```
+
+强校验复合类型数据：key 必须存在，Redis type 必须正确，内容必须完整一致。
+
+### 6.12 `assert_complex_values_missing_or_exact()`
+
+```python
+def assert_complex_values_missing_or_exact(
+    self,
+    expected: Dict[str, Tuple[str, Any]],
+) -> None
+```
+
+弱校验复合类型数据：key 可以不存在；但只要 key 存在，Redis type 和完整内容必须正确。
+
+语义：用于 repair 后允许受损 SST 覆盖的数据丢失，但不允许出现 hash/set/zset/list 半残、错误成员、错误分数、错误顺序或错误类型。
+
 ## 7. shardsvr 进程控制接口
 
 ### 7.1 `kill_shardsvr()`
@@ -1443,7 +1500,7 @@ def flushmem_partitions_except(self, excluded_partition_ids: Set[str]) -> None
 def sst_files(self, target: Partition) -> List[str]
 ```
 
-返回目标 partition RocksDB 目录下所有 SST 表文件。
+返回目标 partition RocksDB 目录下所有 SST regular table files。
 
 | 参数 | 类型 | 含义 |
 |---|---:|---|
@@ -1455,6 +1512,8 @@ def sst_files(self, target: Partition) -> List[str]
 
 - `*.sst`
 - `*.ldb`
+
+注意：同名目录不会作为 SST 文件返回。
 
 ### 10.5 `sst_snapshot()`
 
@@ -1612,6 +1671,31 @@ def pick_largest_live_sst(
 
 失败条件：没有任何 live SST 满足条件时抛出 `AssertionError`。
 
+### 10.10 `pick_largest_live_ssts()`
+
+```python
+def pick_largest_live_ssts(
+    self,
+    target: Partition,
+    preferred_files: Optional[List[str]] = None,
+    count: int = 2,
+    min_size: int = 1,
+) -> List[str]
+```
+
+选择目标 partition 当前仍然存在的多个 live SST regular files，并按文件大小从大到小返回。
+
+| 参数 | 类型 | 含义 |
+|---|---:|---|
+| `target` | `Partition` | 目标 partition。 |
+| `preferred_files` | `Optional[List[str]]` | 优先候选 SST 列表。 |
+| `count` | `int` | 需要返回的 SST 文件数量。默认 `2`。 |
+| `min_size` | `int` | 最小文件大小，单位 byte。默认 `1`。 |
+
+用途：多个 SST 同时缺失、多个 SST 同时部分损坏等复合故障用例。
+
+失败条件：满足条件的 live SST 数量少于 `count` 时抛出 `AssertionError`。
+
 ## 11. SST 故障注入接口
 
 ### 11.1 `delete_sst_file()`
@@ -1629,6 +1713,39 @@ def delete_sst_file(self, path: str) -> None
 返回值：`None`。
 
 失败条件：文件不存在时抛出 `AssertionError`。
+
+### 11.1.1 `chmod_sst_file()`
+
+```python
+def chmod_sst_file(self, path: str, mode: int) -> int
+```
+
+修改 SST 文件权限，并返回修改前的 permission bits。
+
+| 参数 | 类型 | 含义 |
+|---|---:|---|
+| `path` | `str` | SST 文件路径。 |
+| `mode` | `int` | 新权限，例如 `0` 表示 `chmod 000`。 |
+
+返回值：`int`，修改前的权限位。测试结束清理时可用 `os.chmod(path, old_mode)` 恢复。
+
+### 11.1.2 `replace_sst_file_with_directory()`
+
+```python
+def replace_sst_file_with_directory(self, path: str) -> int
+```
+
+删除 SST 文件，并在原路径创建同名目录，用于模拟 SST 文件被目录替代。
+
+返回值：`int`，原 SST 文件大小。
+
+### 11.1.3 `remove_sst_directory_replacement()`
+
+```python
+def remove_sst_directory_replacement(self, path: str) -> None
+```
+
+如果 `path` 是 `replace_sst_file_with_directory()` 产生的空目录，则删除该目录。用于测试失败或 repair 后的清理路径。
 
 ### 11.2 `truncate_sst_file_to_half()`
 
