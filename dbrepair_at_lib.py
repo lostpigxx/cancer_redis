@@ -1645,7 +1645,12 @@ class RepairAT:
 
         return entries
 
-    def _decode_sst_filter_block_handle(self, data: bytes) -> Tuple[bytes, int, int]:
+    def _decode_sst_meta_block_handle(
+        self,
+        data: bytes,
+        key_part: bytes,
+        block_name: str,
+    ) -> Tuple[bytes, int, int]:
         metaindex_offset, metaindex_size = self._decode_sst_footer_metaindex_handle(
             data,
         )
@@ -1656,14 +1661,15 @@ class RepairAT:
             "metaindex",
         )
 
-        filter_handles: List[Tuple[bytes, int, int]] = []
+        block_handles: List[Tuple[bytes, int, int]] = []
+        key_part_lower = key_part.lower()
 
         for key, value in meta_entries:
-            if b"filter" not in key.lower():
+            if key_part_lower not in key.lower():
                 continue
 
             try:
-                filter_offset, filter_size, pos = self._decode_sst_block_handle(
+                block_offset, block_size, pos = self._decode_sst_block_handle(
                     value,
                     0,
                     len(value),
@@ -1677,20 +1683,37 @@ class RepairAT:
             try:
                 self._assert_sst_block_handle_in_file(
                     data,
-                    filter_offset,
-                    filter_size,
-                    "filter block {!r}".format(key),
+                    block_offset,
+                    block_size,
+                    "{} block {!r}".format(block_name, key),
                 )
             except AssertionError:
                 continue
 
-            filter_handles.append((key, filter_offset, filter_size))
+            block_handles.append((key, block_offset, block_size))
 
-        assert filter_handles, (
-            "no filter block handle found in SST metaindex"
+        assert block_handles, (
+            "no {} block handle found in SST metaindex".format(block_name)
         )
 
-        return sorted(filter_handles, key=lambda item: item[0])[0]
+        return sorted(block_handles, key=lambda item: item[0])[0]
+
+    def _decode_sst_filter_block_handle(self, data: bytes) -> Tuple[bytes, int, int]:
+        return self._decode_sst_meta_block_handle(
+            data,
+            b"filter",
+            "filter",
+        )
+
+    def _decode_sst_properties_block_handle(
+        self,
+        data: bytes,
+    ) -> Tuple[bytes, int, int]:
+        return self._decode_sst_meta_block_handle(
+            data,
+            b"properties",
+            "properties",
+        )
 
     def corrupt_sst_checksum_area(self, path: str) -> Tuple[int, int, int]:
         """
@@ -1812,6 +1835,72 @@ class RepairAT:
                 filter_key,
                 filter_offset,
                 filter_size,
+                offset,
+                actual_len,
+            )
+        )
+
+        return old_size, offset, actual_len
+
+    def corrupt_sst_properties_block_area(self, path: str) -> Tuple[int, int, int]:
+        """
+        解析 SST metaindex，找到 properties block，并翻转该 block trailer 中的 checksum。
+
+        RocksDB block trailer 结构为：
+          1 byte compression type + 4 byte checksum
+        """
+        with open(path, "rb") as f:
+            data = f.read()
+
+        old_size = len(data)
+        properties_key, properties_offset, properties_size = (
+            self._decode_sst_properties_block_handle(data)
+        )
+        offset = properties_offset + properties_size + 1
+        actual_len = 4
+
+        assert offset + actual_len <= old_size, (
+            "invalid SST properties block corruption range: "
+            "path={}, size={}, properties_key={!r}, properties_offset={}, "
+            "properties_size={}, offset={}, length={}".format(
+                path,
+                old_size,
+                properties_key,
+                properties_offset,
+                properties_size,
+                offset,
+                actual_len,
+            )
+        )
+
+        with open(path, "r+b") as f:
+            f.seek(offset)
+            checksum = f.read(actual_len)
+
+            assert len(checksum) == actual_len, (
+                "failed to read SST properties checksum bytes: "
+                "path={}, offset={}".format(
+                    path,
+                    offset,
+                )
+            )
+
+            bad = bytes(b ^ 0xff for b in checksum)
+
+            f.seek(offset)
+            f.write(bad)
+            f.flush()
+            os.fsync(f.fileno())
+
+        print(
+            "corrupted SST properties block area: "
+            "path={}, size={}, properties_key={!r}, properties_offset={}, "
+            "properties_size={}, offset={}, length={}".format(
+                path,
+                old_size,
+                properties_key,
+                properties_offset,
+                properties_size,
                 offset,
                 actual_len,
             )
