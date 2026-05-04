@@ -1715,7 +1715,38 @@ actual_len = min(length, old_size // 4)
 
 失败条件：`old_size <= length * 2` 时抛出 `AssertionError`。
 
-### 11.5 `corrupt_sst_data_block_area()`
+### 11.5 `corrupt_sst_magic_number()`
+
+```python
+def corrupt_sst_magic_number(self, path: str) -> Tuple[int, int, int]
+```
+
+翻转 SST 文件末尾 8 字节 magic number，保留文件名和文件大小。
+
+| 参数 | 类型 | 含义 |
+|---|---:|---|
+| `path` | `str` | SST 文件路径。 |
+
+返回值：`Tuple[int, int, int]`。
+
+结构：
+
+```python
+(old_size, offset, actual_len)
+```
+
+| 返回元素 | 类型 | 含义 |
+|---|---:|---|
+| `old_size` | `int` | 覆盖前文件大小。 |
+| `offset` | `int` | magic number 覆盖起始 offset。 |
+| `actual_len` | `int` | 实际覆盖长度，固定为 `8`。 |
+
+失败条件：
+
+- 文件大小小于等于 `8` 时抛出 `AssertionError`。
+- 覆盖后文件大小发生变化时抛出 `AssertionError`。
+
+### 11.6 `corrupt_sst_data_block_area()`
 
 ```python
 def corrupt_sst_data_block_area(
@@ -1761,7 +1792,7 @@ actual_len = min(length, old_size // 16)
 
 注意：data block 损坏不一定在 RocksDB Open 阶段暴露。有些配置只会在 Get、Iterator 或 Compaction 读取该 block 时发现 checksum mismatch。
 
-### 11.6 `corrupt_sst_checksum_area()`
+### 11.7 `corrupt_sst_checksum_area()`
 
 ```python
 def corrupt_sst_checksum_area(self, path: str) -> Tuple[int, int, int]
@@ -1905,7 +1936,7 @@ at.assert_values_missing_or_exact(expected)
 
 ### 13.3 SST 损坏类故障
 
-适用于删除 SST、截断 SST、损坏 SST tail、损坏 SST data block 区域、损坏 SST checksum 区域等场景。
+适用于删除 SST、截断 SST、损坏 SST tail、损坏 SST magic number、损坏 SST data block 区域、损坏 SST checksum 区域等场景。
 
 ```python
 target = at.pick_target_partition()
@@ -1928,6 +1959,7 @@ at.repair_and_wait_opened(target)
 at.delete_sst_file(sst)
 at.zero_sst_file(sst)
 at.corrupt_sst_tail(sst)
+at.corrupt_sst_magic_number(sst)
 at.corrupt_sst_data_block_area(sst)
 at.corrupt_sst_checksum_area(sst)
 ```
@@ -1949,6 +1981,7 @@ at.corrupt_sst_checksum_area(sst)
 - `truncate_sst_file_to_half()`
 - `zero_sst_file()`
 - `corrupt_sst_tail()`
+- `corrupt_sst_magic_number()`
 - `corrupt_sst_data_block_area()`
 
 这些接口应只在测试环境中使用。

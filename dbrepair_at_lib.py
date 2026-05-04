@@ -1303,6 +1303,61 @@ class RepairAT:
 
         return old_size, offset, actual_len
 
+    def corrupt_sst_magic_number(self, path: str) -> Tuple[int, int, int]:
+        """
+        翻转 SST 文件末尾 8 字节 magic number。
+        """
+        old_size = os.path.getsize(path)
+        actual_len = 8
+
+        assert old_size > actual_len, (
+            "SST file too small to corrupt magic number: path={}, size={}".format(
+                path,
+                old_size,
+            )
+        )
+
+        offset = old_size - actual_len
+
+        with open(path, "r+b") as f:
+            f.seek(offset)
+            original = f.read(actual_len)
+
+            assert len(original) == actual_len, (
+                "failed to read SST magic number bytes: path={}, offset={}".format(
+                    path,
+                    offset,
+                )
+            )
+
+            bad = bytes(b ^ 0xff for b in original)
+
+            f.seek(offset)
+            f.write(bad)
+            f.flush()
+            os.fsync(f.fileno())
+
+        new_size = os.path.getsize(path)
+        assert new_size == old_size, (
+            "SST file size changed after magic number corruption: "
+            "path={}, old_size={}, new_size={}".format(
+                path,
+                old_size,
+                new_size,
+            )
+        )
+
+        print(
+            "corrupted SST magic number: path={}, size={}, offset={}, length={}".format(
+                path,
+                old_size,
+                offset,
+                actual_len,
+            )
+        )
+
+        return old_size, offset, actual_len
+
     def corrupt_sst_data_block_area(
         self,
         path: str,
