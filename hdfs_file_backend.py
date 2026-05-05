@@ -54,7 +54,7 @@ class HdfsFileBackend:
             "BASE_PATH must be an absolute HDFS path: {}".format(remote_base_path)
         )
 
-        os.makedirs(self.local_staging_dir, exist_ok=True)
+        self._ensure_local_dir(self.local_staging_dir)
 
     def remote_partition_dir(self, partition_id: str) -> str:
         partition_dir_name = self.partition_dir_template.format(
@@ -168,7 +168,8 @@ class HdfsFileBackend:
         return sorted(entries, key=lambda item: item.path)
 
     def get_file(self, remote_path: str, local_path: str) -> None:
-        os.makedirs(os.path.dirname(local_path), exist_ok=True)
+        local_dir = os.path.dirname(local_path)
+        self._ensure_local_dir(local_dir)
 
         if os.path.exists(local_path):
             if os.path.isdir(local_path) and not os.path.islink(local_path):
@@ -176,7 +177,24 @@ class HdfsFileBackend:
             else:
                 os.remove(local_path)
 
-        self._run(["-get", remote_path, self._command_local_path(local_path)])
+        downloaded_path = os.path.join(local_dir, posixpath.basename(remote_path))
+        if downloaded_path != local_path and os.path.exists(downloaded_path):
+            if os.path.isdir(downloaded_path) and not os.path.islink(downloaded_path):
+                shutil.rmtree(downloaded_path)
+            else:
+                os.remove(downloaded_path)
+
+        self._run(["-get", remote_path, self._command_local_path(local_dir)])
+
+        assert os.path.isfile(downloaded_path), (
+            "HDFS get did not create local file: remote_path={}, expected_local_path={}".format(
+                remote_path,
+                downloaded_path,
+            )
+        )
+
+        if downloaded_path != local_path:
+            os.rename(downloaded_path, local_path)
 
     def mkdir(self, remote_path: str) -> None:
         self._run(["-mkdir", "-p", remote_path])
@@ -221,13 +239,13 @@ class HdfsFileBackend:
         if os.path.exists(local_dir):
             shutil.rmtree(local_dir)
 
-        os.makedirs(local_dir, exist_ok=True)
+        self._ensure_local_dir(local_dir)
 
         for entry in entries:
             local_path = os.path.join(local_dir, entry.name)
 
             if entry.kind == "dir":
-                os.makedirs(local_path, exist_ok=True)
+                self._ensure_local_dir(local_path)
                 continue
 
             self.get_file(entry.path, local_path)
@@ -313,6 +331,12 @@ class HdfsFileBackend:
         ]
 
         return any(marker in stderr for marker in missing_markers)
+
+    def _ensure_local_dir(self, path: str) -> None:
+        os.makedirs(path, exist_ok=True)
+
+        if self.chroot_dir:
+            os.chmod(path, 0o777)
 
     def _detect_chroot_dir(self, command: List[str]) -> Optional[str]:
         if not command:
