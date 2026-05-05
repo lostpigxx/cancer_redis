@@ -22,29 +22,42 @@ PROXY_PORT = 6379
 
 SHARDSVR1_HOST = "shardsvr1-host"
 SHARDSVR2_HOST = "shardsvr2-host"
-SHARDSVR1_PORT = 6381
-SHARDSVR2_PORT = 6382
+SHARDSVR_PORT = 6378
+SHARDSVR1_PORT = SHARDSVR_PORT
+SHARDSVR2_PORT = SHARDSVR_PORT
 
-SHARDSVR_PORTS = [
-    SHARDSVR1_PORT,
-    SHARDSVR2_PORT,
+SHARDSVR_NODES = [
+    {
+        "name": "shardsvr1",
+        "host": SHARDSVR1_HOST,
+        "port": SHARDSVR1_PORT,
+    },
+    {
+        "name": "shardsvr2",
+        "host": SHARDSVR2_HOST,
+        "port": SHARDSVR2_PORT,
+    },
 ]
 
-# 兼容旧代码路径。集群版 RepairAT 会优先使用 *_HOST 和 SHARDSVR_ENDPOINTS。
+SHARDSVR_PORTS = [
+    node["port"]
+    for node in SHARDSVR_NODES
+]
+
+# 兼容旧代码路径。cluster 模式不要把 port 当作 shardsvr 唯一标识；
+# 真正的节点身份是 SHARDSVR_NODES 里的 host:port。
 REDIS_HOST = PROXY_HOST
 
-SHARDSVR_ENDPOINTS = {
-    SHARDSVR1_PORT: (SHARDSVR1_HOST, SHARDSVR1_PORT),
-    SHARDSVR2_PORT: (SHARDSVR2_HOST, SHARDSVR2_PORT),
-}
-
-# 如果 cfgsvr/proxy 返回的 owner host 与端口配置不一致，可在这里显式覆盖。
+# 如果 cfgsvr/proxy 返回的 owner host 与配置不一致，可在这里显式覆盖。
 NODE_HOSTS_BY_PORT = {
     CFGSVR_PORT: CFGSVR_HOST,
     PROXY_PORT: PROXY_HOST,
-    SHARDSVR1_PORT: SHARDSVR1_HOST,
-    SHARDSVR2_PORT: SHARDSVR2_HOST,
 }
+
+# 优先选择哪个 shardsvr 节点上的 partition 做故障注入。
+PREFERRED_TARGET_SHARDSVR_NAME = "shardsvr1"
+PREFERRED_TARGET_SHARDSVR_OWNER = ""
+PREFERRED_TARGET_SHARDSVR_PORT = SHARDSVR_PORT
 
 
 # =============================================================================
@@ -85,28 +98,17 @@ HDFS_PUT_SUPPORTS_FORCE = True
 # shardsvr 进程控制配置
 # =============================================================================
 
-# 如果关闭 HA，start_shardsvr() 会先同步 HDFS 修改，再 ssh 到目标 shardsvr
-# 节点执行这里配置的启动命令，最后等待 ping。
-#
-# 支持 {host}、{port}、{owner_host} 占位符。
-START_SHARDSVR_COMMANDS = {
-    SHARDSVR1_PORT: [
-        "ssh",
-        "{host}",
-        "su - Ruby -c \"python /dbs/agent/engine/gemini/gemini_agent/db/redis/redis_manager.py start_shard\"",
-    ],
-    SHARDSVR2_PORT: [
-        "ssh",
-        "{host}",
-        "su - Ruby -c \"python /dbs/agent/engine/gemini/gemini_agent/db/redis/redis_manager.py start_shard\"",
-    ],
-}
+# HA 关闭后，start_shardsvr() 会先同步 HDFS 修改，然后在控制台提示
+# 操作者到目标 host 手工拉起 shardsvr，并等待输入 yes 后继续。
+# cluster 模式不使用 START_SHARDSVR_COMMANDS 自动拉起进程。
+START_SHARDSVR_COMMANDS = {}
 
-# kill 命令必须在真实环境填写。支持 {host}、{port}、{owner_host} 占位符。
+# kill 命令必须在真实环境填写。建议按节点 name 配置，支持
+# {name}、{host}、{port}、{owner}、{owner_host} 占位符。
 # 示例：
 # KILL_SHARDSVR_COMMANDS = {
-#     6381: ["ssh", "{host}", "pkill -9 -f 'gemini-redis-server.*6381'"],
-#     6382: ["ssh", "{host}", "pkill -9 -f 'gemini-redis-server.*6382'"],
+#     "shardsvr1": ["ssh", "{host}", "pkill -9 -f 'gemini-redis-server.*6378'"],
+#     "shardsvr2": ["ssh", "{host}", "pkill -9 -f 'gemini-redis-server.*6378'"],
 # }
 KILL_SHARDSVR_COMMANDS = {}
 
@@ -114,11 +116,8 @@ KILL_SHARDSVR_COMMANDS = {}
 CLUSTER_WAIT_PORT_DOWN_TIMEOUT_SEC = 1.0
 CLUSTER_REQUIRE_PORT_DOWN_AFTER_KILL = True
 
-# start 命令执行后等待 shardsvr ping 成功的超时时间。
+# 人工确认启动后等待 shardsvr ping 成功的超时时间。
 CLUSTER_START_WAIT_PING_TIMEOUT_SEC = 60.0
-
-# 如果 START_SHARDSVR_COMMANDS 为空，则退化为等待 HA 自动拉起。
-CLUSTER_HA_WAIT_PING_TIMEOUT_SEC = 60.0
 
 
 # =============================================================================

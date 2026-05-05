@@ -30,13 +30,16 @@ from dbrepair_at_lib import RepairAT
 CFGSVR_HOST = "cfgsvr-host"
 PROXY_HOST = "proxy-host"
 
-SHARDSVR_ENDPOINTS = {
-    6381: ("shardsvr1-host", 6381),
-    6382: ("shardsvr2-host", 6382),
-}
+SHARDSVR_NODES = [
+    {"name": "shardsvr1", "host": "shardsvr1-host", "port": 6378},
+    {"name": "shardsvr2", "host": "shardsvr2-host", "port": 6378},
+]
 ```
 
-`RepairAT.redis_conn(port)` 会按端口选择 host；`flushmem`、`dbrepair auto`、`wait_ping` 等用例接口不需要改。
+cluster 模式下 shardsvr 节点身份是 `owner = host:port`，不是单独的 port。
+因此 shardsvr1 和 shardsvr2 可以使用相同端口，只要 host 不同即可。
+
+`flushmem`、`dbrepair auto`、`kill_shardsvr(target.shard_port)`、`start_shardsvr(target.shard_port)` 等现有用例接口不需要改；cluster 版 `RepairAT` 会优先使用最近一次 `pick_target_partition()` 选出的 target owner 来消除同端口歧义。
 
 ## 3. HDFS RocksDB 文件配置
 
@@ -70,8 +73,9 @@ HDFS 不支持本地文件式原地修改，因此集群版流程是：
 2. 用例在 staging 文件上执行删除、截断、覆盖、创建目录等故障注入。
 3. `ctx.start_shardsvr(port)` 前，框架比较 fault window 前后的 staging 快照。
 4. 发生变化的文件通过 `hdfs dfs -rm/-mkdir/-put` 同步回 HDFS。
-5. 通过 `START_SHARDSVR_COMMANDS` ssh 到目标节点启动 shardsvr。
-6. 等待 shardsvr `PING` 成功。
+5. 打印英文提示，列出故障已同步、相关 partition、相关 HDFS 文件和目标 host。
+6. 操作者手工拉起目标 host 上的 shardsvr 后，在控制台输入 `yes`。
+7. 框架等待 shardsvr `PING` 成功，然后继续后续 corrupted/repair 断言。
 
 因此集群模式下，用例仍然写：
 
@@ -83,7 +87,7 @@ with ctx.heartbeat_disabled():
     ctx.start_shardsvr(target.shard_port)
 ```
 
-`start_shardsvr()` 在集群模式负责同步 HDFS 修改、执行远程启动命令并等待目标 shardsvr 恢复。
+`start_shardsvr()` 在集群模式负责同步 HDFS 修改、提示人工启动并等待目标 shardsvr 恢复。
 
 ## 5. shardsvr kill/start 配置
 
@@ -96,28 +100,16 @@ KILL_SHARDSVR_COMMANDS = {
 }
 ```
 
-关闭 HA 后，需要配置 start 命令。框架会自动 ssh 到目标 shardsvr
-节点执行命令：
-
-```python
-START_SHARDSVR_COMMANDS = {
-    6381: [
-        "ssh",
-        "{host}",
-        "su - Ruby -c \"python /dbs/agent/engine/gemini/gemini_agent/db/redis/redis_manager.py start_shard\"",
-    ],
-    6382: [
-        "ssh",
-        "{host}",
-        "su - Ruby -c \"python /dbs/agent/engine/gemini/gemini_agent/db/redis/redis_manager.py start_shard\"",
-    ],
-}
-```
+停止命令建议按 `SHARDSVR_NODES` 的 `name` 配置。也支持按
+`owner`（例如 `"shardsvr1-host:6378"`）、host、`(host, port)` 配置。
+当多个节点使用同一个 port 时，不要用 port 作为命令 key。
 
 支持占位符：
 
+- `{name}`：节点名，例如 `shardsvr1`。
 - `{host}`：端口对应的 host。
 - `{owner_host}`：同 `{host}`，保留给 owner 映射扩展。
+- `{owner}`：`host:port`。
 - `{port}`：shardsvr 端口。
 
 关闭 HA 后，建议要求 kill 后端口确实 down：
@@ -128,11 +120,17 @@ CLUSTER_REQUIRE_PORT_DOWN_AFTER_KILL = True
 CLUSTER_START_WAIT_PING_TIMEOUT_SEC = 60.0
 ```
 
-如果仍使用 HA，把 `START_SHARDSVR_COMMANDS` 置空，`start_shardsvr()` 会退化为只等待 HA 自动拉起：
+`start_shardsvr()` 同步 HDFS 修改后会输出类似：
 
-```python
-START_SHARDSVR_COMMANDS = {}
-CLUSTER_HA_WAIT_PING_TIMEOUT_SEC = 60.0
+```text
+RocksDB fault injection has been completed and synced to HDFS.
+Related partition(s): <partition-id>
+Related file(s):
+  - <hdfs-path>
+Please start the shardsvr process manually.
+Target host: <host>
+Target owner: <host:port>
+After the shardsvr process is started, type 'yes' and press Enter.
 ```
 
 ## 6. 已知能力差异

@@ -256,13 +256,16 @@ class HdfsFileBackend:
         self,
         partition_id: str,
         before: Dict[str, LocalMeta],
-    ) -> None:
+    ) -> List[str]:
         local_dir = self.local_partition_dir(partition_id)
         remote_dir = self.remote_partition_dir(partition_id)
         after = self.snapshot_local_partition(partition_id)
+        changed_paths: List[str] = []
 
         for name in sorted(set(before) - set(after)):
-            self.rm(posixpath.join(remote_dir, name), ignore_missing=True)
+            remote_path = posixpath.join(remote_dir, name)
+            self.rm(remote_path, ignore_missing=True)
+            changed_paths.append(remote_path)
 
         for name, meta in sorted(after.items()):
             remote_path = posixpath.join(remote_dir, name)
@@ -275,10 +278,14 @@ class HdfsFileBackend:
             if meta[0] == "dir":
                 self.rm(remote_path, ignore_missing=True)
                 self.mkdir(remote_path)
+                changed_paths.append(remote_path)
                 continue
 
             self.rm(remote_path, ignore_missing=True)
             self.put_file(local_path, remote_path)
+            changed_paths.append(remote_path)
+
+        return changed_paths
 
     def _sha256_file(self, path: str) -> str:
         digest = hashlib.sha256()
