@@ -2,10 +2,8 @@
 #
 # DBRepair AT 分布式 / HDFS / HA 场景配置。
 #
-# 本文件只放环境配置，不放测试逻辑。公共写入量、用例风险开关等默认值
-# 复用 env_local.py；集群场景只覆盖连接、HDFS 和 HA 相关配置。
-
-from env_local import *  # noqa: F401,F403
+# 本文件只放环境配置，不放测试逻辑。
+# cluster 模式配置与 env_local.py 独立维护，不从 env_local.py 继承默认值。
 
 
 # =============================================================================
@@ -43,6 +41,9 @@ SHARDSVR_PORTS = [
     node["port"]
     for node in SHARDSVR_NODES
 ]
+
+# 当前 cluster 环境 partition 数量。必须按真实 cfgsvr route 配置填写。
+EXPECTED_PARTITION_COUNT = 3
 
 # 兼容旧代码路径。cluster 模式不要把 port 当作 shardsvr 唯一标识；
 # 真正的节点身份是 SHARDSVR_NODES 里的 host:port。
@@ -102,6 +103,165 @@ HDFS_PUT_SUPPORTS_FORCE = True
 # 操作者到目标 host 手工拉起 shardsvr，并等待输入 yes 后继续。
 # cluster 模式不使用 START_SHARDSVR_COMMANDS 自动拉起进程。
 START_SHARDSVR_COMMANDS = {}
+
+
+# =============================================================================
+# flushmem 命令配置
+# =============================================================================
+
+# flushmem 是发给目标 partition owner shardsvr 的命令，用于把 memtable flush 成 SST。
+#
+# 如果真实命令是：
+#   flushmem <partition>
+# 保持默认：
+#   ["flushmem", "{partition_id}"]
+#
+# 如果真实命令是：
+#   flushmem
+# 改成：
+#   ["flushmem"]
+#
+# 支持占位符：
+#   {partition_id}
+#   {shard_port}
+FLUSHMEM_COMMAND_TEMPLATE = ["flushmem", "{partition_id}"]
+
+# flushmem 后等待 SST 生成的超时时间。
+WAIT_SST_TIMEOUT_SEC = 30
+
+
+# =============================================================================
+# compact 命令配置
+# =============================================================================
+
+# compact 是发给 shardsvr 的命令，用于构造 L1/L2 等 lower-level SST。
+#
+# 如果真实命令是：
+#   compactmem <partition>
+# 则配置：
+#   ["compactmem", "{partition_id}"]
+#
+# 如果真实命令是：
+#   compact <partition>
+# 则配置：
+#   ["compact", "{partition_id}"]
+#
+# 如果没有 compact 接口，保持空列表。
+# S8 lower-level SST 用例依赖这个配置。
+COMPACT_COMMAND_TEMPLATE = []
+
+# compact 后等待 SST 集合变化的超时时间。
+WAIT_COMPACT_TIMEOUT_SEC = 60
+
+
+# =============================================================================
+# MANIFEST 元数据编辑工具配置
+# =============================================================================
+
+# M16 依赖 lower-level MANIFEST 编辑工具，在当前 MANIFEST 中定向篡改 SST
+# metadata，例如引用不存在 SST、错误 file number、错误 level、错误 key range。
+#
+# 如果没有这类工具，保持空列表，M16 会 pytest.skip。
+#
+# 示例：
+# MANIFEST_METADATA_TAMPER_COMMAND_TEMPLATE = [
+#     "/path/to/manifest_tamper",
+#     "--case", "{case_name}",
+#     "--manifest", "{manifest_path}",
+#     "--sst-file-number", "{sst_file_number}",
+#     "--partition", "{partition_id}",
+# ]
+#
+# 支持占位符：
+#   {case_name}
+#   {partition_id}
+#   {partition_db_dir}
+#   {manifest_path}
+#   {manifest_name}
+#   {sst_path}
+#   {sst_name}
+#   {sst_file_number}
+#   {shard_port}
+MANIFEST_METADATA_TAMPER_COMMAND_TEMPLATE = []
+
+
+# =============================================================================
+# 默认写入参数
+# =============================================================================
+
+# 通用写入参数。
+DEFAULT_WRITE_COUNT = 1024
+DEFAULT_VALUE_SIZE = 2048
+
+# 为 SST 用例准备目标 SST 的默认写入量。
+SST_PREPARE_WRITE_COUNT = 1024
+SST_PREPARE_VALUE_SIZE = 2048
+
+# data block 损坏用例需要较大的 SST。
+SST_DATA_BLOCK_WRITE_COUNT = 4096
+SST_DATA_BLOCK_VALUE_SIZE = 2048
+SST_DATA_BLOCK_MIN_FILE_SIZE = 64 * 1024
+
+
+# =============================================================================
+# WAL 故障注入参数
+# =============================================================================
+
+# WAL 中间丢失注入参数。
+# 每个增长 WAL 会删除多个中间片段。
+WAL_MIDDLE_LOSS_GAP_COUNT = 3
+WAL_MIDDLE_LOSS_GAP_SIZE = 4096
+
+# 写入后 WAL 至少增长多少字节，才认为目标写入确实进入了目标 partition 的 WAL。
+MIN_TARGET_WAL_GROWTH = 16 * 1024
+
+
+# =============================================================================
+# S7：L0 多 SST 部分损坏
+# =============================================================================
+
+# 构造多少个 L0 SST。
+S7_L0_FILE_COUNT = 3
+
+# 每个 L0 SST 写入多少 key。
+S7_WRITE_COUNT_PER_FILE = 256
+S7_VALUE_SIZE = 1024
+
+
+# =============================================================================
+# S8：L1/L2 SST 损坏
+# =============================================================================
+
+# compact 前的 base 数据。
+S8_BASE_WRITE_COUNT = 2048
+S8_BASE_VALUE_SIZE = 1024
+
+# compact 后的 overlay 数据。
+S8_OVERLAY_WRITE_COUNT = 256
+S8_OVERLAY_VALUE_SIZE = 512
+
+
+# =============================================================================
+# S9 / S10：修复风险用例开关
+# =============================================================================
+
+# S9：一个 key 的新版本 SST 损坏后，旧版本是否复活。
+#
+# False：
+#   只打印风险，不让用例失败。
+#
+# True：
+#   如果观察到旧版本复活，则用例失败。
+S9_FAIL_ON_OLD_VALUE_RESURRECTION = False
+
+# S10：Delete tombstone SST 损坏后，被删除 key 是否复活。
+#
+# False：
+#   只打印风险，不让用例失败。
+#
+# True：
+#   如果观察到删除 key 复活，则用例失败。
+S10_FAIL_ON_DELETE_TOMBSTONE_RESURRECTION = False
 
 # kill_shardsvr() 通过 Redis 协议向目标 shardsvr 发送无参数 shutdown。
 # 如果 HA 已关闭，建议设为 True，确保 shutdown 后目标 shardsvr 确实停止。
