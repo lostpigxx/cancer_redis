@@ -82,11 +82,25 @@ HDFS_PUT_SUPPORTS_FORCE = True
 
 
 # =============================================================================
-# HA / shardsvr 进程控制配置
+# shardsvr 进程控制配置
 # =============================================================================
 
-# 分布式环境由 HA 自动拉起 shardsvr，start_shardsvr() 只同步 HDFS 修改并等待 ping。
-START_SHARDSVR_COMMANDS = {}
+# 如果关闭 HA，start_shardsvr() 会先同步 HDFS 修改，再 ssh 到目标 shardsvr
+# 节点执行这里配置的启动命令，最后等待 ping。
+#
+# 支持 {host}、{port}、{owner_host} 占位符。
+START_SHARDSVR_COMMANDS = {
+    SHARDSVR1_PORT: [
+        "ssh",
+        "{host}",
+        "su - Ruby -c \"python /dbs/agent/engine/gemini/gemini_agent/db/redis/redis_manager.py start_shard\"",
+    ],
+    SHARDSVR2_PORT: [
+        "ssh",
+        "{host}",
+        "su - Ruby -c \"python /dbs/agent/engine/gemini/gemini_agent/db/redis/redis_manager.py start_shard\"",
+    ],
+}
 
 # kill 命令必须在真实环境填写。支持 {host}、{port}、{owner_host} 占位符。
 # 示例：
@@ -96,9 +110,14 @@ START_SHARDSVR_COMMANDS = {}
 # }
 KILL_SHARDSVR_COMMANDS = {}
 
-# HA 会很快拉起进程，默认只短暂探测端口是否 down；没观察到 down 不立即失败。
+# 如果 HA 已关闭，建议设为 True，确保 kill 后目标 shardsvr 确实停止。
 CLUSTER_WAIT_PORT_DOWN_TIMEOUT_SEC = 1.0
-CLUSTER_REQUIRE_PORT_DOWN_AFTER_KILL = False
+CLUSTER_REQUIRE_PORT_DOWN_AFTER_KILL = True
+
+# start 命令执行后等待 shardsvr ping 成功的超时时间。
+CLUSTER_START_WAIT_PING_TIMEOUT_SEC = 60.0
+
+# 如果 START_SHARDSVR_COMMANDS 为空，则退化为等待 HA 自动拉起。
 CLUSTER_HA_WAIT_PING_TIMEOUT_SEC = 60.0
 
 

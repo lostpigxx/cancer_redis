@@ -257,6 +257,7 @@ class HdfsFileBackend:
         partition_id: str,
         before: Dict[str, LocalMeta],
     ) -> None:
+        local_dir = self.local_partition_dir(partition_id)
         remote_dir = self.remote_partition_dir(partition_id)
         after = self.snapshot_local_partition(partition_id)
 

@@ -70,7 +70,8 @@ HDFS 不支持本地文件式原地修改，因此集群版流程是：
 2. 用例在 staging 文件上执行删除、截断、覆盖、创建目录等故障注入。
 3. `ctx.start_shardsvr(port)` 前，框架比较 fault window 前后的 staging 快照。
 4. 发生变化的文件通过 `hdfs dfs -rm/-mkdir/-put` 同步回 HDFS。
-5. 等待 HA 自动拉起 shardsvr 并 `PING` 成功。
+5. 通过 `START_SHARDSVR_COMMANDS` ssh 到目标节点启动 shardsvr。
+6. 等待 shardsvr `PING` 成功。
 
 因此集群模式下，用例仍然写：
 
@@ -82,9 +83,9 @@ with ctx.heartbeat_disabled():
     ctx.start_shardsvr(target.shard_port)
 ```
 
-`start_shardsvr()` 在集群模式不会手动启动进程，它负责同步 HDFS 修改并等待 HA 拉起。
+`start_shardsvr()` 在集群模式负责同步 HDFS 修改、执行远程启动命令并等待目标 shardsvr 恢复。
 
-## 5. HA kill 配置
+## 5. shardsvr kill/start 配置
 
 集群模式必须配置 kill 命令：
 
@@ -95,21 +96,44 @@ KILL_SHARDSVR_COMMANDS = {
 }
 ```
 
+关闭 HA 后，需要配置 start 命令。框架会自动 ssh 到目标 shardsvr
+节点执行命令：
+
+```python
+START_SHARDSVR_COMMANDS = {
+    6381: [
+        "ssh",
+        "{host}",
+        "su - Ruby -c \"python /dbs/agent/engine/gemini/gemini_agent/db/redis/redis_manager.py start_shard\"",
+    ],
+    6382: [
+        "ssh",
+        "{host}",
+        "su - Ruby -c \"python /dbs/agent/engine/gemini/gemini_agent/db/redis/redis_manager.py start_shard\"",
+    ],
+}
+```
+
 支持占位符：
 
 - `{host}`：端口对应的 host。
 - `{owner_host}`：同 `{host}`，保留给 owner 映射扩展。
 - `{port}`：shardsvr 端口。
 
-HA 可能很快拉起进程，所以默认不强制要求 kill 后端口持续 down：
+关闭 HA 后，建议要求 kill 后端口确实 down：
 
 ```python
 CLUSTER_WAIT_PORT_DOWN_TIMEOUT_SEC = 1.0
-CLUSTER_REQUIRE_PORT_DOWN_AFTER_KILL = False
-CLUSTER_HA_WAIT_PING_TIMEOUT_SEC = 60.0
+CLUSTER_REQUIRE_PORT_DOWN_AFTER_KILL = True
+CLUSTER_START_WAIT_PING_TIMEOUT_SEC = 60.0
 ```
 
-如果环境支持暂停 HA，建议在 `KILL_SHARDSVR_COMMANDS` 或外部测试流程中加入维护模式，稳定性会更好。
+如果仍使用 HA，把 `START_SHARDSVR_COMMANDS` 置空，`start_shardsvr()` 会退化为只等待 HA 自动拉起：
+
+```python
+START_SHARDSVR_COMMANDS = {}
+CLUSTER_HA_WAIT_PING_TIMEOUT_SEC = 60.0
+```
 
 ## 6. 已知能力差异
 

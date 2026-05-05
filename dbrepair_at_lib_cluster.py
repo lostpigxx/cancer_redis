@@ -2,7 +2,7 @@
 
 import os
 import subprocess
-from typing import Any, Dict, List, Set
+from typing import Any, Dict, List, Optional, Set
 
 import redis
 
@@ -28,7 +28,8 @@ class RepairAT(LocalRepairAT):
       2. RocksDB 文件从 HDFS 镜像到本地 staging 目录；
       3. 测试仍可用 open/os.path/glob 修改 staging 文件；
       4. start_shardsvr() 前统一把 staging 变化同步回 HDFS；
-      5. shardsvr 由 HA 自动拉起，start_shardsvr() 不再手动 Popen。
+      5. start_shardsvr() 通过 ssh 到目标节点执行启动命令；
+      6. START_SHARDSVR_COMMANDS 为空时，兼容等待 HA 自动拉起。
     """
 
     def __init__(self) -> None:
@@ -115,15 +116,38 @@ class RepairAT(LocalRepairAT):
 
     def start_shardsvr(self, port: int) -> None:
         """
-        集群模式不手动启动 shardsvr。
+        集群模式先同步 HDFS 故障文件，再启动 shardsvr。
 
-        HA 会自动拉起进程；这里先把本地 staging 的故障写回 HDFS，
-        再等待对应 shardsvr ping 成功。
+        HA 关闭时，通过 env_cluster.START_SHARDSVR_COMMANDS ssh 到目标节点
+        执行启动命令；若命令为空，则兼容旧行为，只等待 HA 自动拉起。
         """
         self._sync_fault_window_changes()
 
+        cmd = self._start_command(port)
+
+        if cmd:
+            print("start shardsvr: port={}, cmd={}".format(port, cmd))
+
+            if isinstance(cmd, str):
+                subprocess.check_call(cmd, shell=True)
+            else:
+                subprocess.check_call(cmd)
+
+            timeout = getattr(test_env, "CLUSTER_START_WAIT_PING_TIMEOUT_SEC", 60.0)
+            print(
+                "wait started shardsvr ping: port={}, timeout={}".format(
+                    port,
+                    timeout,
+                )
+            )
+            self.wait_ping(port, timeout_sec=timeout)
+            return
+
         timeout = getattr(test_env, "CLUSTER_HA_WAIT_PING_TIMEOUT_SEC", 60.0)
-        print("wait HA to start shardsvr: port={}, timeout={}".format(port, timeout))
+        print(
+            "START_SHARDSVR_COMMANDS[{}] is empty, wait HA to start shardsvr: "
+            "timeout={}".format(port, timeout)
+        )
         self.wait_ping(port, timeout_sec=timeout)
 
     def _kill_command(self, port: int) -> Any:
@@ -134,6 +158,18 @@ class RepairAT(LocalRepairAT):
             "missing KILL_SHARDSVR_COMMANDS[{}] in env_cluster.py".format(port)
         )
 
+        return self._render_node_command(template, port)
+
+    def _start_command(self, port: int) -> Optional[Any]:
+        commands = getattr(test_env, "START_SHARDSVR_COMMANDS", {})
+        template = commands.get(port)
+
+        if not template:
+            return None
+
+        return self._render_node_command(template, port)
+
+    def _render_node_command(self, template: Any, port: int) -> Any:
         context = {
             "host": self._host_for_port(port),
             "owner_host": self._host_for_port(port),
