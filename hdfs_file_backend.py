@@ -167,7 +167,12 @@ class HdfsFileBackend:
 
         return sorted(entries, key=lambda item: item.path)
 
-    def get_file(self, remote_path: str, local_path: str) -> None:
+    def get_file(
+        self,
+        remote_path: str,
+        local_path: str,
+        expected_size: Optional[int] = None,
+    ) -> None:
         local_dir = os.path.dirname(local_path)
         self._ensure_local_dir(local_dir)
 
@@ -195,6 +200,8 @@ class HdfsFileBackend:
 
         if downloaded_path != local_path:
             os.rename(downloaded_path, local_path)
+
+        self._assert_downloaded_file(remote_path, local_path, expected_size)
 
     def mkdir(self, remote_path: str) -> None:
         self._run(["-mkdir", "-p", remote_path])
@@ -248,7 +255,7 @@ class HdfsFileBackend:
                 self._ensure_local_dir(local_path)
                 continue
 
-            self.get_file(entry.path, local_path)
+            self.get_file(entry.path, local_path, expected_size=entry.size)
 
         return local_dir
 
@@ -331,6 +338,33 @@ class HdfsFileBackend:
         ]
 
         return any(marker in stderr for marker in missing_markers)
+
+    def _assert_downloaded_file(
+        self,
+        remote_path: str,
+        local_path: str,
+        expected_size: Optional[int],
+    ) -> None:
+        assert os.path.isfile(local_path), (
+            "HDFS get did not create final local file: remote_path={}, local_path={}".format(
+                remote_path,
+                local_path,
+            )
+        )
+
+        if expected_size is None:
+            return
+
+        actual_size = os.path.getsize(local_path)
+        assert actual_size == expected_size, (
+            "HDFS get local size mismatch: remote_path={}, local_path={}, "
+            "expected_size={}, actual_size={}".format(
+                remote_path,
+                local_path,
+                expected_size,
+                actual_size,
+            )
+        )
 
     def _ensure_local_dir(self, path: str) -> None:
         os.makedirs(path, exist_ok=True)
