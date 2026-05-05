@@ -89,6 +89,10 @@ HDFS_DFS_COMMAND = [
 ]
 
 # HDFS 文件先镜像到本地，测试用例仍用 open/os.path/glob 访问本地镜像。
+# 若 HDFS_DFS_COMMAND 使用 chroot，该路径按 chroot 内路径解释：
+#   /tmp/dbrepair_at_hdfs_staging
+# 对应宿主机：
+#   /var/chroot/gemini/tmp/dbrepair_at_hdfs_staging
 LOCAL_STAGING_DIR = "/tmp/dbrepair_at_hdfs_staging"
 
 # Hadoop 2.7 支持 -put -f；若环境不支持，可置为 False，后端会先 rm 再 put。

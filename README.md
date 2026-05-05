@@ -193,6 +193,8 @@ DBREPAIR_AT_MODE = "cluster"
 - `CLUSTER_REQUIRE_PORT_DOWN_AFTER_KILL`
 - `CLUSTER_START_WAIT_PING_TIMEOUT_SEC`
 
+如果 `HDFS_DFS_COMMAND` 使用 `/usr/sbin/chroot ... /var/chroot/gemini/ ...`，`LOCAL_STAGING_DIR` 按 chroot 内路径解释。例如配置 `/tmp/dbrepair_at_hdfs_staging` 时，框架会在宿主机读写 `/var/chroot/gemini/tmp/dbrepair_at_hdfs_staging`，并向 `hdfs dfs -get/-put` 传入 `/tmp/dbrepair_at_hdfs_staging`。
+
 cluster 模式下 `ctx.kill_shardsvr(...)` 会通过 Redis 协议向目标 shardsvr
 发送无参数 `shutdown` 命令，不需要配置外部 kill 命令。
 

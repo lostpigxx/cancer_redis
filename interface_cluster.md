@@ -63,6 +63,8 @@ LOCAL_STAGING_DIR = "/tmp/dbrepair_at_hdfs_staging"
 
 集群版 `RepairAT.partition_db_dir(target)` 返回的是本地 staging 目录，不是 HDFS 路径。后端会从 HDFS 同步目标 partition 文件到本地，测试用例可以继续用 `open()`、`os.path.exists()`、`glob.glob()` 操作这些路径。
 
+如果 `HDFS_DFS_COMMAND` 通过 `chroot` 执行，`LOCAL_STAGING_DIR` 表示 chroot 内部路径。例如配置 `/tmp/dbrepair_at_hdfs_staging` 时，Python 实际读写宿主机 `/var/chroot/gemini/tmp/dbrepair_at_hdfs_staging`，传给 `hdfs dfs -get/-put` 的仍是 chroot 内可见的 `/tmp/dbrepair_at_hdfs_staging`。
+
 如果真实 HDFS 目录名不是纯 partition id，可调整 `HDFS_PARTITION_DIR_TEMPLATE`。例如固定前缀目录可配置为 `"rocks-{partition_id}"`。
 
 ## 4. HDFS 修改模型

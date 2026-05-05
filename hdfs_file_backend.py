@@ -41,7 +41,11 @@ class HdfsFileBackend:
         self.dfs_command = list(dfs_command)
         self.remote_base_path = remote_base_path.rstrip("/")
         self.shard_subdir = shard_subdir.strip("/")
-        self.local_staging_dir = os.path.abspath(local_staging_dir)
+        self.chroot_dir = self._detect_chroot_dir(self.dfs_command)
+        self.command_local_staging_dir = os.path.abspath(local_staging_dir)
+        self.local_staging_dir = self._host_local_path(
+            self.command_local_staging_dir,
+        )
         self.partition_dir_template = partition_dir_template
         self.put_supports_force = put_supports_force
 
@@ -172,7 +176,7 @@ class HdfsFileBackend:
             else:
                 os.remove(local_path)
 
-        self._run(["-get", remote_path, local_path])
+        self._run(["-get", remote_path, self._command_local_path(local_path)])
 
     def mkdir(self, remote_path: str) -> None:
         self._run(["-mkdir", "-p", remote_path])
@@ -200,13 +204,14 @@ class HdfsFileBackend:
     def put_file(self, local_path: str, remote_path: str) -> None:
         parent = posixpath.dirname(remote_path)
         self.mkdir(parent)
+        command_local_path = self._command_local_path(local_path)
 
         if self.put_supports_force:
-            self._run(["-put", "-f", local_path, remote_path])
+            self._run(["-put", "-f", command_local_path, remote_path])
             return
 
         self.rm(remote_path, ignore_missing=True)
-        self._run(["-put", local_path, remote_path])
+        self._run(["-put", command_local_path, remote_path])
 
     def sync_partition_to_local(self, partition_id: str) -> str:
         remote_dir = self.remote_partition_dir(partition_id)
@@ -308,3 +313,58 @@ class HdfsFileBackend:
         ]
 
         return any(marker in stderr for marker in missing_markers)
+
+    def _detect_chroot_dir(self, command: List[str]) -> Optional[str]:
+        if not command:
+            return None
+
+        if os.path.basename(command[0]) != "chroot":
+            return None
+
+        i = 1
+        while i < len(command):
+            arg = command[i]
+
+            if arg in ("--userspec", "--groups"):
+                i += 2
+                continue
+
+            if arg.startswith("-"):
+                i += 1
+                continue
+
+            return os.path.abspath(arg)
+
+        return None
+
+    def _host_local_path(self, command_path: str) -> str:
+        command_path = os.path.abspath(command_path)
+
+        if not self.chroot_dir:
+            return command_path
+
+        chroot_dir = self.chroot_dir.rstrip(os.sep)
+        if command_path == chroot_dir or command_path.startswith(chroot_dir + os.sep):
+            return command_path
+
+        return os.path.join(chroot_dir, command_path.lstrip(os.sep))
+
+    def _command_local_path(self, local_path: str) -> str:
+        local_path = os.path.abspath(local_path)
+
+        if not self.chroot_dir:
+            return local_path
+
+        chroot_dir = self.chroot_dir.rstrip(os.sep)
+        assert local_path == chroot_dir or local_path.startswith(chroot_dir + os.sep), (
+            "local path is not inside HDFS chroot staging dir: path={}, chroot={}".format(
+                local_path,
+                chroot_dir,
+            )
+        )
+
+        rel = os.path.relpath(local_path, chroot_dir)
+        if rel == ".":
+            return "/"
+
+        return "/" + rel.replace(os.sep, "/")
