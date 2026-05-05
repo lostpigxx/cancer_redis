@@ -356,15 +356,44 @@ class HdfsFileBackend:
             return
 
         actual_size = os.path.getsize(local_path)
-        assert actual_size == expected_size, (
+        if actual_size == expected_size:
+            return
+
+        refreshed_size = self._remote_file_size(remote_path)
+        if refreshed_size is not None and actual_size == refreshed_size:
+            return
+
+        if expected_size == 0 and actual_size > 0:
+            print(
+                "HDFS get size metadata changed after ls: remote_path={}, "
+                "initial_size={}, refreshed_size={}, actual_size={}".format(
+                    remote_path,
+                    expected_size,
+                    refreshed_size,
+                    actual_size,
+                )
+            )
+            return
+
+        raise AssertionError(
             "HDFS get local size mismatch: remote_path={}, local_path={}, "
-            "expected_size={}, actual_size={}".format(
+            "initial_expected_size={}, refreshed_expected_size={}, actual_size={}".format(
                 remote_path,
                 local_path,
                 expected_size,
+                refreshed_size,
                 actual_size,
             )
         )
+
+    def _remote_file_size(self, remote_path: str) -> Optional[int]:
+        entries = self.ls(remote_path, allow_missing=True)
+
+        for entry in entries:
+            if entry.path == remote_path and entry.kind == "file":
+                return entry.size
+
+        return None
 
     def _ensure_local_dir(self, path: str) -> None:
         os.makedirs(path, exist_ok=True)
