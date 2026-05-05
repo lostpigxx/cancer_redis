@@ -3,7 +3,6 @@
 import glob
 import os
 import re
-import signal
 import stat
 import subprocess
 import time
@@ -732,14 +731,21 @@ class RepairAT:
     # ----------------------------------------------------------------------
 
     def kill_shardsvr(self, port: int) -> None:
-        pids = self._find_listen_pids(port)
-        assert pids, "no process is listening on port {}".format(port)
-
-        for pid in pids:
-            print("kill shardsvr: port={}, pid={}".format(port, pid))
-            os.kill(pid, signal.SIGKILL)
+        print("shutdown shardsvr: port={}".format(port))
+        self._send_shutdown(self.shard_conn(port), "port={}".format(port))
 
         self._wait_port_down(port, timeout_sec=10)
+
+    def _send_shutdown(self, conn: redis.Redis, label: str) -> None:
+        assert conn.ping() is True, "shardsvr not alive before shutdown: {}".format(
+            label,
+        )
+
+        try:
+            conn.execute_command("shutdown")
+        except (redis.exceptions.ConnectionError, redis.exceptions.TimeoutError):
+            # Redis closes the connection while processing SHUTDOWN.
+            pass
 
     def start_shardsvr(self, port: int) -> None:
         cmd = test_env.START_SHARDSVR_COMMANDS.get(port)

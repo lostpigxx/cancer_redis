@@ -189,12 +189,12 @@ DBREPAIR_AT_MODE = "cluster"
 - `HDFS_PARTITION_DIR_TEMPLATE`
 - `HDFS_DFS_COMMAND`
 - `LOCAL_STAGING_DIR`
-- `KILL_SHARDSVR_COMMANDS`
 - `CLUSTER_WAIT_PORT_DOWN_TIMEOUT_SEC`
 - `CLUSTER_REQUIRE_PORT_DOWN_AFTER_KILL`
 - `CLUSTER_START_WAIT_PING_TIMEOUT_SEC`
 
-`KILL_SHARDSVR_COMMANDS` 建议按 `SHARDSVR_NODES` 的 `name` 配置。当多个节点使用同一个 port 时，不要用 port 作为唯一 key。
+cluster 模式下 `ctx.kill_shardsvr(...)` 会通过 Redis 协议向目标 shardsvr
+发送无参数 `shutdown` 命令，不需要配置外部 kill 命令。
 
 ### cluster 执行约束
 

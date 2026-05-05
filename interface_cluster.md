@@ -89,30 +89,13 @@ with ctx.heartbeat_disabled():
 
 `start_shardsvr()` 在集群模式负责同步 HDFS 修改、提示人工启动并等待目标 shardsvr 恢复。
 
-## 5. shardsvr kill/start 配置
+## 5. shardsvr shutdown/start 配置
 
-集群模式必须配置 kill 命令：
+集群模式下 `ctx.kill_shardsvr(...)` 不再依赖外部 kill 命令配置。
+框架会解析目标 shardsvr 节点，并通过 Redis 协议向该节点发送无参数
+`shutdown` 命令。
 
-```python
-KILL_SHARDSVR_COMMANDS = {
-    6381: ["ssh", "{host}", "pkill -9 -f 'gemini-redis-server.*6381'"],
-    6382: ["ssh", "{host}", "pkill -9 -f 'gemini-redis-server.*6382'"],
-}
-```
-
-停止命令建议按 `SHARDSVR_NODES` 的 `name` 配置。也支持按
-`owner`（例如 `"shardsvr1-host:6378"`）、host、`(host, port)` 配置。
-当多个节点使用同一个 port 时，不要用 port 作为命令 key。
-
-支持占位符：
-
-- `{name}`：节点名，例如 `shardsvr1`。
-- `{host}`：端口对应的 host。
-- `{owner_host}`：同 `{host}`，保留给 owner 映射扩展。
-- `{owner}`：`host:port`。
-- `{port}`：shardsvr 端口。
-
-关闭 HA 后，建议要求 kill 后端口确实 down：
+关闭 HA 后，建议要求 shutdown 后端口确实 down：
 
 ```python
 CLUSTER_WAIT_PORT_DOWN_TIMEOUT_SEC = 1.0

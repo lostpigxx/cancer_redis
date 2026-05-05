@@ -1006,7 +1006,7 @@ def assert_complex_values_missing_or_exact(
 def kill_shardsvr(self, port: int) -> None
 ```
 
-查找监听指定端口的进程，并发送 `SIGKILL`。
+向指定端口的 shardsvr 发送无参数 `shutdown` 命令。
 
 | 参数 | 类型 | 含义 |
 |---|---:|---|
@@ -1016,14 +1016,15 @@ def kill_shardsvr(self, port: int) -> None
 
 内部行为：
 
-1. 调用 `_find_listen_pids(port)` 查找监听端口的 PID。
-2. 对每个 PID 执行 `os.kill(pid, signal.SIGKILL)`。
+1. 通过 `shard_conn(port)` 连接目标 shardsvr。
+2. 执行 `shutdown`，不附加任何额外参数。
 3. 调用 `_wait_port_down(port, timeout_sec=10)` 等待端口不可 ping。
 
 失败条件：
 
-- 找不到监听进程时抛出 `AssertionError`。
-- kill 后端口仍可 ping 时抛出 `AssertionError`。
+- shutdown 前目标 shardsvr 不可 ping 时抛出 `AssertionError` 或连接异常。
+- `shutdown` 命令返回非连接关闭类错误时抛出原始异常。
+- shutdown 后端口仍可 ping 时抛出 `AssertionError`。
 
 ### 7.2 `start_shardsvr()`
 

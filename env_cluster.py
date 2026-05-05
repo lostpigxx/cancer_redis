@@ -103,16 +103,8 @@ HDFS_PUT_SUPPORTS_FORCE = True
 # cluster 模式不使用 START_SHARDSVR_COMMANDS 自动拉起进程。
 START_SHARDSVR_COMMANDS = {}
 
-# kill 命令必须在真实环境填写。建议按节点 name 配置，支持
-# {name}、{host}、{port}、{owner}、{owner_host} 占位符。
-# 示例：
-# KILL_SHARDSVR_COMMANDS = {
-#     "shardsvr1": ["ssh", "{host}", "pkill -9 -f 'gemini-redis-server.*6378'"],
-#     "shardsvr2": ["ssh", "{host}", "pkill -9 -f 'gemini-redis-server.*6378'"],
-# }
-KILL_SHARDSVR_COMMANDS = {}
-
-# 如果 HA 已关闭，建议设为 True，确保 kill 后目标 shardsvr 确实停止。
+# kill_shardsvr() 通过 Redis 协议向目标 shardsvr 发送无参数 shutdown。
+# 如果 HA 已关闭，建议设为 True，确保 shutdown 后目标 shardsvr 确实停止。
 CLUSTER_WAIT_PORT_DOWN_TIMEOUT_SEC = 1.0
 CLUSTER_REQUIRE_PORT_DOWN_AFTER_KILL = True
 

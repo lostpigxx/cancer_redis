@@ -1,7 +1,6 @@
 # dbrepair_at_lib_cluster.py
 
 import os
-import subprocess
 import time
 from typing import Any, Dict, List, Optional, Set, Tuple
 
@@ -219,28 +218,17 @@ class RepairAT(LocalRepairAT):
             )
         )
 
-    def _command_lookup_keys(self, node: Dict[str, Any]) -> List[Any]:
-        return [
-            node["owner"],
-            node["name"],
-            node["host"],
-            (node["host"], node["port"]),
-            node["port"],
-        ]
-
     # ------------------------------------------------------------------
     # shardsvr 进程控制 / HA 拉起
     # ------------------------------------------------------------------
 
     def kill_shardsvr(self, port: int) -> None:
         node = self._resolve_node(port)
-        cmd = self._kill_command(node)
-        print("kill shardsvr: node={}, cmd={}".format(node["owner"], cmd))
-
-        if isinstance(cmd, str):
-            subprocess.check_call(cmd, shell=True)
-        else:
-            subprocess.check_call(cmd)
+        print("shutdown shardsvr: node={}".format(node["owner"]))
+        self._send_shutdown(
+            self._redis_conn_to(node["host"], node["port"]),
+            "node={}".format(node["owner"]),
+        )
 
         self._last_killed_node = node
         self._in_fault_window = True
@@ -279,46 +267,6 @@ class RepairAT(LocalRepairAT):
         )
         self._wait_ping_node(node, timeout_sec=timeout)
         self._last_killed_node = None
-
-    def _kill_command(self, node: Dict[str, Any]) -> Any:
-        commands = getattr(test_env, "KILL_SHARDSVR_COMMANDS", {})
-        template = self._command_template(commands, node)
-
-        assert template, (
-            "missing KILL_SHARDSVR_COMMANDS for node {} in env_cluster.py".format(
-                node["owner"],
-            )
-        )
-
-        return self._render_node_command(template, node)
-
-    def _command_template(self, commands: Dict[Any, Any], node: Dict[str, Any]) -> Any:
-        for key in self._command_lookup_keys(node):
-            if key in commands:
-                if key == node["port"] and len(self._nodes_for_port(node["port"])) > 1:
-                    raise AssertionError(
-                        "command key {} is ambiguous because multiple shardsvr nodes "
-                        "use this port; key commands by node name or owner instead".format(
-                            key,
-                        )
-                    )
-                return commands[key]
-
-        return None
-
-    def _render_node_command(self, template: Any, node: Dict[str, Any]) -> Any:
-        context = {
-            "name": node["name"],
-            "host": node["host"],
-            "owner_host": node["host"],
-            "owner": node["owner"],
-            "port": node["port"],
-        }
-
-        if isinstance(template, str):
-            return template.format(**context)
-
-        return [str(item).format(**context) for item in template]
 
     def _prompt_manual_shardsvr_start(
         self,
