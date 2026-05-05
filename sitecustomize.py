@@ -7,6 +7,7 @@ except Exception:
 
 
 if DBREPAIR_AT_MODE == "cluster":
-    from cluster_pytest_console import install
+    from cluster_pytest_console import install, install_import_hook
 
     install()
+    install_import_hook()
