@@ -78,6 +78,7 @@ HDFS 不支持本地文件式原地修改，因此集群版流程是：
 5. 打印英文提示，列出故障已同步、相关 partition、相关 HDFS 文件和目标 host。
 6. 操作者手工拉起目标 host 上的 shardsvr 后，在控制台输入 `yes`。
 7. 框架等待 shardsvr `PING` 成功，然后继续后续 corrupted/repair 断言。
+8. `ctx.repair_and_wait_opened(target)` 等待 partition 恢复 opened 后，会重新从 HDFS 下载目标 partition 到 staging；repair 新建的 `CURRENT`、`MANIFEST` 等文件应以刷新后的 staging 内容为准。
 
 因此集群模式下，用例仍然写：
 

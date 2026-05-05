@@ -460,6 +460,23 @@ class RepairAT(LocalRepairAT):
         print("dbrepair auto response: {!r}".format(resp))
         return resp
 
+    def repair_and_wait_opened(self, target: Partition, timeout_sec: float = 60.0) -> Partition:
+        repaired = super().repair_and_wait_opened(
+            target=target,
+            timeout_sec=timeout_sec,
+        )
+
+        print(
+            "refresh HDFS staging after repair: partition={}, remote_dir={}".format(
+                target.partition_id,
+                self.hdfs.remote_partition_dir(target.partition_id),
+            )
+        )
+        self.hdfs.sync_partition_to_local(target.partition_id)
+        self._mirrored_partitions.add(target.partition_id)
+
+        return repaired
+
     # ------------------------------------------------------------------
     # HDFS staging 文件视图
     # ------------------------------------------------------------------

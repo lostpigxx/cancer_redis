@@ -261,6 +261,7 @@ cluster 模式下 RocksDB 文件位于 HDFS，用例仍然按本地文件方式�
 4. 将变化同步回 HDFS。
 5. 等待人工启动 shardsvr 并输入 `yes`。
 6. 继续 corrupted、pin、repair 和数据校验断言。
+7. `repair_and_wait_opened()` 成功后，框架会重新从 HDFS 下载目标 partition 到 staging，repair 新建的 `CURRENT`/`MANIFEST` 会反映到本地路径。
 
 ## 标准用例流程
 
