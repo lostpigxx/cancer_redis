@@ -231,14 +231,15 @@ class RepairAT(LocalRepairAT):
         )
 
         self._last_killed_node = node
-        self._in_fault_window = True
-        self._capture_fault_window_snapshots()
-
-        timeout = getattr(test_env, "CLUSTER_WAIT_PORT_DOWN_TIMEOUT_SEC", 1.0)
-        require_down = getattr(test_env, "CLUSTER_REQUIRE_PORT_DOWN_AFTER_KILL", False)
+        timeout = getattr(test_env, "CLUSTER_WAIT_PORT_DOWN_TIMEOUT_SEC", 10.0)
+        require_down = getattr(test_env, "CLUSTER_REQUIRE_PORT_DOWN_AFTER_KILL", True)
+        settle_sec = getattr(test_env, "CLUSTER_AFTER_PORT_DOWN_SETTLE_SEC", 1.0)
 
         try:
             self._wait_node_down(node, timeout_sec=timeout)
+            if settle_sec > 0:
+                time.sleep(settle_sec)
+                self._wait_node_down(node, timeout_sec=0.5)
         except AssertionError as exc:
             if require_down:
                 raise
@@ -246,6 +247,10 @@ class RepairAT(LocalRepairAT):
                 "port did not stay down after kill, probably HA already restarted: "
                 "node={}, error={}".format(node["owner"], exc)
             )
+
+        self._refresh_mirrored_partitions_from_hdfs()
+        self._in_fault_window = True
+        self._capture_fault_window_snapshots()
 
     def start_shardsvr(self, port: int) -> None:
         """
@@ -488,6 +493,16 @@ class RepairAT(LocalRepairAT):
             self._fault_window_snapshots[partition_id] = (
                 self.hdfs.snapshot_local_partition(partition_id)
             )
+
+    def _refresh_mirrored_partitions_from_hdfs(self) -> None:
+        for partition_id in sorted(self._mirrored_partitions):
+            print(
+                "refresh HDFS staging after shardsvr down: partition={}, remote_dir={}".format(
+                    partition_id,
+                    self.hdfs.remote_partition_dir(partition_id),
+                )
+            )
+            self.hdfs.sync_partition_to_local(partition_id)
 
     def _sync_fault_window_changes(self) -> Dict[str, List[str]]:
         if not self._in_fault_window and not self._fault_window_snapshots:

@@ -97,11 +97,12 @@ with ctx.heartbeat_disabled():
 框架会解析目标 shardsvr 节点，并通过 Redis 协议向该节点发送无参数
 `shutdown` 命令。
 
-关闭 HA 后，建议要求 shutdown 后端口确实 down：
+关闭 HA 后，必须要求 shutdown 后端口确实 down。端口 down 后框架还会短暂等待并再次确认连接不可建立，然后重新从 HDFS 镜像已访问过的 partition，再开始文件故障注入窗口：
 
 ```python
-CLUSTER_WAIT_PORT_DOWN_TIMEOUT_SEC = 1.0
+CLUSTER_WAIT_PORT_DOWN_TIMEOUT_SEC = 10.0
 CLUSTER_REQUIRE_PORT_DOWN_AFTER_KILL = True
+CLUSTER_AFTER_PORT_DOWN_SETTLE_SEC = 1.0
 CLUSTER_START_WAIT_PING_TIMEOUT_SEC = 60.0
 ```
 

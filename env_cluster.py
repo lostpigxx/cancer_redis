@@ -268,9 +268,10 @@ S9_FAIL_ON_OLD_VALUE_RESURRECTION = False
 S10_FAIL_ON_DELETE_TOMBSTONE_RESURRECTION = False
 
 # kill_shardsvr() 通过 Redis 协议向目标 shardsvr 发送无参数 shutdown。
-# 如果 HA 已关闭，建议设为 True，确保 shutdown 后目标 shardsvr 确实停止。
-CLUSTER_WAIT_PORT_DOWN_TIMEOUT_SEC = 1.0
+# 文件故障注入前必须确认目标 shardsvr 已经停止，否则 HDFS staging 可能旧于服务端。
+CLUSTER_WAIT_PORT_DOWN_TIMEOUT_SEC = 10.0
 CLUSTER_REQUIRE_PORT_DOWN_AFTER_KILL = True
+CLUSTER_AFTER_PORT_DOWN_SETTLE_SEC = 1.0
 
 # 人工确认启动后等待 shardsvr ping 成功的超时时间。
 CLUSTER_START_WAIT_PING_TIMEOUT_SEC = 60.0
