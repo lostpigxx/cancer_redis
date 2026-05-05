@@ -198,6 +198,35 @@ class HdfsFileBackend:
 
         self._assert_downloaded_file(remote_path, local_path)
 
+    def get_dir(self, remote_dir: str, local_dir: str) -> None:
+        local_parent = os.path.dirname(local_dir)
+        downloaded_dir = os.path.join(
+            local_parent,
+            posixpath.basename(remote_dir.rstrip("/")),
+        )
+
+        self._ensure_local_dir(local_parent)
+
+        if os.path.exists(local_dir):
+            shutil.rmtree(local_dir)
+
+        if downloaded_dir != local_dir and os.path.exists(downloaded_dir):
+            shutil.rmtree(downloaded_dir)
+
+        self._run(["-get", remote_dir, self._command_local_path(local_parent)])
+
+        assert os.path.isdir(downloaded_dir), (
+            "HDFS get did not create local directory: remote_dir={}, expected_local_dir={}".format(
+                remote_dir,
+                downloaded_dir,
+            )
+        )
+
+        if downloaded_dir != local_dir:
+            os.rename(downloaded_dir, local_dir)
+
+        self._assert_partition_staging_dir(remote_dir, local_dir)
+
     def mkdir(self, remote_path: str) -> None:
         self._run(["-mkdir", "-p", remote_path])
 
@@ -237,21 +266,7 @@ class HdfsFileBackend:
         remote_dir = self.remote_partition_dir(partition_id)
         local_dir = self.local_partition_dir(partition_id)
 
-        entries = self.ls(remote_dir)
-        if os.path.exists(local_dir):
-            shutil.rmtree(local_dir)
-
-        self._ensure_local_dir(local_dir)
-
-        for entry in entries:
-            local_path = os.path.join(local_dir, entry.name)
-
-            if entry.kind == "dir":
-                self._ensure_local_dir(local_path)
-                continue
-
-            self.get_file(entry.path, local_path)
-
+        self.get_dir(remote_dir, local_dir)
         return local_dir
 
     def snapshot_local_partition(self, partition_id: str) -> Dict[str, LocalMeta]:
@@ -343,6 +358,38 @@ class HdfsFileBackend:
             "HDFS get did not create final local file: remote_path={}, local_path={}".format(
                 remote_path,
                 local_path,
+            )
+        )
+
+    def _assert_partition_staging_dir(self, remote_dir: str, local_dir: str) -> None:
+        assert os.path.isdir(local_dir), (
+            "HDFS get did not create final local partition dir: remote_dir={}, local_dir={}".format(
+                remote_dir,
+                local_dir,
+            )
+        )
+
+        names = set(os.listdir(local_dir))
+        assert names, (
+            "HDFS get created empty local partition dir: remote_dir={}, local_dir={}".format(
+                remote_dir,
+                local_dir,
+            )
+        )
+
+        assert "CURRENT" in names, (
+            "HDFS get local partition dir missing CURRENT: remote_dir={}, local_dir={}, files={}".format(
+                remote_dir,
+                local_dir,
+                sorted(names),
+            )
+        )
+
+        assert any(name.startswith("MANIFEST-") for name in names), (
+            "HDFS get local partition dir missing MANIFEST: remote_dir={}, local_dir={}, files={}".format(
+                remote_dir,
+                local_dir,
+                sorted(names),
             )
         )
 
